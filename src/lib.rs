@@ -1,3 +1,4 @@
+use std::collections::hash_map::HashMap;
 use std::time::Instant;
 
 use image::GrayImage;
@@ -21,8 +22,9 @@ pub fn estimate_noise_from_image(image: &GrayImage) -> f32 {
             histogram[pixel_value.0[0] as usize] += 1;
         }
     }
-    // Discard the top 5% of the histogram (possibly stars). We want only dark
-    // pixels to contribute to the noise estimate.
+    debug!("Histogram: {:?}", histogram);
+    // Discard the top 5% of the histogram. We want only non-star pixels
+    // to contribute to the noise estimate.
     let keep_count: i32 = (box_size * box_size * 95 / 100) as i32;
     let mut kept_so_far = 0;
     let mut first_moment = 0;
@@ -44,14 +46,16 @@ pub fn estimate_noise_from_image(image: &GrayImage) -> f32 {
     stddev as f32
 }
 
+#[derive(Copy, Clone)]
 struct CandidateFromRowScan {
-    pub x: i32,
-    pub y: i32,
+    x: i32,
+    y: i32,
 }
 
+// The candidates are returned in raster scan order.
 fn scan_rows_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
                             -> Vec<CandidateFromRowScan> {
-    let scan_start = Instant::now();
+    let row_scan_start = Instant::now();
     let (width, height) = image.dimensions();
     let image_pixels: &Vec<u8> = image.as_raw();
     let mut candidates: Vec<CandidateFromRowScan> = Vec::new();
@@ -75,12 +79,11 @@ fn scan_rows_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
             if left > center || center < right {
                 continue;
             }
+            // Center pixel must be strictly brighter than both border pixels.
+            if left_border >= center || center <= right_border {
+                continue;
+            }
             if left == center {
-                if left_border >= left {
-                    // Plateau coming in from the left, but we need to see an increase
-                    // coming from the left to qualify as a candidate.
-                    continue;
-                }
                 // Break tie between left and center.
                 if left_border > right {
                     // Left will have been the center of its own candidate entry.
@@ -88,20 +91,12 @@ fn scan_rows_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
                 }
             }
             if right == center {
-                if right_border >= right {
-                    // Plateau going out to the right, but we need to see a decrease
-                    // going to the right to qualify as a candidate.
-                    continue;
-                }
                 // Break tie between center and right.
                 if left <= right_border {
                     // Right will be the center of its own candidate entry.
                     continue;
                 }
             }
-            // TODO: if left_border or right_border are too bright, don't be
-            // a candidate. Maybe we'll deal with this in the 2d analysis.
-
             // Center pixel must be sigma * estimated noise brighter than
             // the estimated background.
             let center_2 = 2 * center;
@@ -117,13 +112,23 @@ fn scan_rows_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
             if neighbors_over_background_2 < (sigma * est_noise_2 as f32) as i16 {
                 continue;
             }
+            // To guard against being at a bright spot in an extended object such
+            // as the moon, we require the center pixel to not just be
+            // arithmetically above the background, but also to be a ratio higher
+            // than the left_border and right_border background pixels.
+            let frac_center = center * 3 / 4;
+            if frac_center < left_border || frac_center < right_border {
+                continue;
+            }
+
             // We have a candidate star from our 1d analysis!
             candidates.push(CandidateFromRowScan{x: center_x, y: rownum as i32});
             debug!("Candidate at row {} col {}; window {:?}", rownum, center_x, window);
         }
     }
 
-    info!("Row scan found {} candidates in {:?}", candidates.len(), scan_start.elapsed());
+    info!("Row scan found {} candidates in {:?}",
+          candidates.len(), row_scan_start.elapsed());
     candidates
 }
 
@@ -133,18 +138,53 @@ pub struct StarDescription {
     pub centroid_x: f32,
     pub centroid_y: f32,
 
-    // Sum of the u8 pixel values of the 3x3 grid centered on the brightest
-    // pixel. The estimated background is subtracted before the summing.
-    pub sum: i16,
+    // Sum of the u8 pixel values of the star's region. The estimated background
+    // is subtracted before the summing.
+    pub sum: i32,
 }
 
-pub fn get_centroids_from_image(image: &GrayImage, sigma: f32) -> Vec<StarDescription> {
-    let get_centroids_start = Instant::now();
-    let noise_estimate = estimate_noise_from_image(image);
+#[derive(Copy, Clone)]
+struct LabeledCandidate {
+    candidate: CandidateFromRowScan,
+    blob_id: i32,
+}
 
+struct Blob {
+    candidates: Vec<LabeledCandidate>,
+}
+
+pub fn get_centroids_from_image(image: &GrayImage, sigma: f32)
+                                -> Vec<StarDescription> {
+    let get_centroids_start = Instant::now();
+    let (width, height) = image.dimensions();
+    info!("Image width x height: {}x{}", width, height);
+
+    let mut noise_estimate = estimate_noise_from_image(image);
+    if noise_estimate == 0.0 {
+        // Likely the image background is crushed to black.
+        noise_estimate = 1.0;
+    }
     let candidates = scan_rows_for_candidates(image, noise_estimate, sigma);
 
+    let mut labeled_candidates_by_row: Vec<Vec<LabeledCandidate>> = Vec::new();
+    labeled_candidates_by_row.resize(height as usize, Vec::<LabeledCandidate>::new());
+
+    let mut blobs: HashMap<i32, Blob> = HashMap::new();
+    let mut next_blob_id = 0;
+    // Create an initial singular Blob for each candidate.
+    for candidate in candidates {
+        let labeled_candidate = LabeledCandidate{candidate, blob_id: next_blob_id};
+        blobs.insert(next_blob_id, Blob{candidates: vec![labeled_candidate]});
+        labeled_candidates_by_row[candidate.y as usize].push(labeled_candidate);
+        next_blob_id += 1;
+    }
+
+
+
+
     let mut results: Vec<StarDescription> = Vec::new();
+
+    info!("Found {} centroids in {:?}",
+          results.len(), get_centroids_start.elapsed());
     results
 }
-
