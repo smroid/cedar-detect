@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use image::GrayImage;
-use log::info;
+use log::{debug, info};
 
 pub fn estimate_noise_from_image(image: &GrayImage) -> f32 {
     let noise_start = Instant::now();
@@ -44,25 +44,20 @@ pub fn estimate_noise_from_image(image: &GrayImage) -> f32 {
     stddev as f32
 }
 
-pub struct StarDescription {
-    // Location of star centroid in image coordinates. (0.5, 0.5) corresponds
-    // to the center of the image's upper left pixel.
-    pub centroid_x: f32,
-    pub centroid_y: f32,
-
-    // Sum of the u8 pixel values of the 3x3 grid centered on the brightest
-    // pixel. The estimated background is subtracted before the summing.
-    pub sum: i16,
+struct CandidateFromRowScan {
+    pub x: i32,
+    pub y: i32,
 }
 
-pub fn get_centroids_from_image(image: &GrayImage, sigma: f32) -> Vec<StarDescription> {
+fn scan_rows_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
+                            -> Vec<CandidateFromRowScan> {
     let scan_start = Instant::now();
-    let noise_estimate = estimate_noise_from_image(image);
     let (width, height) = image.dimensions();
     let image_pixels: &Vec<u8> = image.as_raw();
-    let mut num_candidates = 0;
+    let mut candidates: Vec<CandidateFromRowScan> = Vec::new();
 
-    for rownum in 2..height-2 {
+    // TODO: shard the rows to multiple threads.
+    for rownum in 0..height {
         // Get the slice of image_pixels corresponding to this row.
         let row_pixels: &[u8] = &image_pixels.as_slice()
             [(rownum * width) as usize .. ((rownum+1) * width) as usize];
@@ -75,19 +70,34 @@ pub fn get_centroids_from_image(image: &GrayImage, sigma: f32) -> Vec<StarDescri
             let center = window[2] as i16;
             let right = window[3] as i16;
             let right_border = window[4] as i16;
-            // Center pixel must be at least as bright as its immediate neighbors.
+            // Center pixel must be at least as bright as its immediate left/right
+            // neighbors.
             if left > center || center < right {
                 continue;
             }
-            if left_border == left && left == center {
-                // Plateau coming in from the left, we need to see an increase
-                // coming from the left to qualify as a candidate.
-                continue;
+            if left == center {
+                if left_border >= left {
+                    // Plateau coming in from the left, but we need to see an increase
+                    // coming from the left to qualify as a candidate.
+                    continue;
+                }
+                // Break tie between left and center.
+                if left_border > right {
+                    // Left will have been the center of its own candidate entry.
+                    continue;
+                }
             }
-            if right_border == right && right == center {
-                // Plateau going out to the right, we need to see a decrease
-                // going to the right to qualify as a candidate.
-                continue;
+            if right == center {
+                if right_border >= right {
+                    // Plateau going out to the right, but we need to see a decrease
+                    // going to the right to qualify as a candidate.
+                    continue;
+                }
+                // Break tie between center and right.
+                if left <= right_border {
+                    // Right will be the center of its own candidate entry.
+                    continue;
+                }
             }
             // TODO: if left_border or right_border are too bright, don't be
             // a candidate. Maybe we'll deal with this in the 2d analysis.
@@ -108,12 +118,31 @@ pub fn get_centroids_from_image(image: &GrayImage, sigma: f32) -> Vec<StarDescri
                 continue;
             }
             // We have a candidate star from our 1d analysis!
-            num_candidates += 1;
-            println!("Candidate at row {} col {}; window {:?}", rownum, center_x, window);
+            candidates.push(CandidateFromRowScan{x: center_x, y: rownum as i32});
+            debug!("Candidate at row {} col {}; window {:?}", rownum, center_x, window);
         }
     }
 
-    info!("initial scan found {} candidates in {:?}", num_candidates, scan_start.elapsed());
+    info!("Row scan found {} candidates in {:?}", candidates.len(), scan_start.elapsed());
+    candidates
+}
+
+pub struct StarDescription {
+    // Location of star centroid in image coordinates. (0.5, 0.5) corresponds
+    // to the center of the image's upper left pixel.
+    pub centroid_x: f32,
+    pub centroid_y: f32,
+
+    // Sum of the u8 pixel values of the 3x3 grid centered on the brightest
+    // pixel. The estimated background is subtracted before the summing.
+    pub sum: i16,
+}
+
+pub fn get_centroids_from_image(image: &GrayImage, sigma: f32) -> Vec<StarDescription> {
+    let get_centroids_start = Instant::now();
+    let noise_estimate = estimate_noise_from_image(image);
+
+    let candidates = scan_rows_for_candidates(image, noise_estimate, sigma);
 
     let mut results: Vec<StarDescription> = Vec::new();
     results
