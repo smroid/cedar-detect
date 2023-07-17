@@ -1,10 +1,11 @@
+use std::cmp;
 use std::collections::hash_map::HashMap;
 use std::time::Instant;
 
 use image::GrayImage;
 use log::{debug, info};
 
-pub fn estimate_noise_from_image(image: &GrayImage) -> f32 {
+fn estimate_noise_from_image(image: &GrayImage) -> f32 {
     let noise_start = Instant::now();
     let (width, height) = image.dimensions();
     let box_size = 20;
@@ -46,7 +47,7 @@ pub fn estimate_noise_from_image(image: &GrayImage) -> f32 {
     stddev as f32
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 struct CandidateFromRowScan {
     x: i32,
     y: i32,
@@ -61,7 +62,7 @@ fn scan_rows_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
     let mut candidates: Vec<CandidateFromRowScan> = Vec::new();
 
     // TODO: shard the rows to multiple threads.
-    for rownum in 0..height {
+    for rownum in 2..height-2 {
         // Get the slice of image_pixels corresponding to this row.
         let row_pixels: &[u8] = &image_pixels.as_slice()
             [(rownum * width) as usize .. ((rownum+1) * width) as usize];
@@ -108,8 +109,8 @@ fn scan_rows_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
             }
             // Sum of left+right pixels must be sigma * estimated noise
             // brighter than the estimated background.
-            let neighbors_over_background_2 = left + right - est_background_2;
-            if neighbors_over_background_2 < (sigma * est_noise_2 as f32) as i16 {
+            let sum_neighbors_over_background = left + right - est_background_2;
+            if sum_neighbors_over_background < (sigma * noise_estimate as f32) as i16 {
                 continue;
             }
             // To guard against being at a bright spot in an extended object such
@@ -132,15 +133,13 @@ fn scan_rows_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
     candidates
 }
 
-pub struct StarDescription {
-    // Location of star centroid in image coordinates. (0.5, 0.5) corresponds
-    // to the center of the image's upper left pixel.
-    pub centroid_x: f32,
-    pub centroid_y: f32,
+#[derive(Debug)]
+struct Blob {
+    candidates: Vec<CandidateFromRowScan>,
 
-    // Sum of the u8 pixel values of the star's region. The estimated background
-    // is subtracted before the summing.
-    pub sum: i32,
+    // If candidates is empty, that means this blob has been merged into
+    // another blob.
+    recipient_blob: i32,
 }
 
 #[derive(Copy, Clone)]
@@ -149,42 +148,215 @@ struct LabeledCandidate {
     blob_id: i32,
 }
 
-struct Blob {
-    candidates: Vec<LabeledCandidate>,
-}
-
-pub fn get_centroids_from_image(image: &GrayImage, sigma: f32)
-                                -> Vec<StarDescription> {
-    let get_centroids_start = Instant::now();
-    let (width, height) = image.dimensions();
-    info!("Image width x height: {}x{}", width, height);
-
-    let mut noise_estimate = estimate_noise_from_image(image);
-    if noise_estimate == 0.0 {
-        // Likely the image background is crushed to black.
-        noise_estimate = 1.0;
-    }
-    let candidates = scan_rows_for_candidates(image, noise_estimate, sigma);
-
+fn form_blobs_from_candidates(candidates: Vec<CandidateFromRowScan>, height: i32)
+                              -> Vec<Blob> {
+    let blobs_start = Instant::now();
     let mut labeled_candidates_by_row: Vec<Vec<LabeledCandidate>> = Vec::new();
     labeled_candidates_by_row.resize(height as usize, Vec::<LabeledCandidate>::new());
 
     let mut blobs: HashMap<i32, Blob> = HashMap::new();
     let mut next_blob_id = 0;
-    // Create an initial singular Blob for each candidate.
+    // Create an initial singular blob for each candidate.
     for candidate in candidates {
-        let labeled_candidate = LabeledCandidate{candidate, blob_id: next_blob_id};
-        blobs.insert(next_blob_id, Blob{candidates: vec![labeled_candidate]});
-        labeled_candidates_by_row[candidate.y as usize].push(labeled_candidate);
+        blobs.insert(next_blob_id, Blob{candidates: vec![candidate],
+                                        recipient_blob: -1});
+        labeled_candidates_by_row[candidate.y as usize].push(
+            LabeledCandidate{candidate, blob_id: next_blob_id});
         next_blob_id += 1;
     }
 
+    // Merge adjacent blobs. Within a row blobs are not adjacent (by definition of
+    // how row scanning identifies candidates), so we just need to look for vertical
+    // adjacencies.
+    // Start processing at row 1 so we can look to previous row for blob merges.
+    for rownum in 1..height as usize {
+        for rc in &labeled_candidates_by_row[rownum] {
+            let rc_pos = rc.candidate.x;
+            // See if rc is adjacent to any candidates in the previous row.
+            // This is fast since rows usually have very few candidates.
+            for prev_row_rc in &labeled_candidates_by_row[rownum - 1] {
+                let prev_row_rc_pos = prev_row_rc.candidate.x;
+                if prev_row_rc_pos <= rc_pos - 3 {
+                    continue;
+                }
+                if prev_row_rc_pos >= rc_pos + 3 {
+                    break;
+                }
+                // Adjacent to a candidate in the previous row. Absorb the previous
+                // row blob's candidates.
+                let recipient_blob_id = rc.blob_id;
+                let mut donor_blob_id = prev_row_rc.blob_id;
+                let mut donated_candidates: Vec<CandidateFromRowScan>;
+                loop {
+                    let donor_blob = blobs.get_mut(&donor_blob_id).unwrap();
+                    if !donor_blob.candidates.is_empty() {
+                        donated_candidates = donor_blob.candidates.drain(..).collect();
+                        assert!(donor_blob.recipient_blob == -1);
+                        donor_blob.recipient_blob = recipient_blob_id;
+                        break;
+                    }
+                    // This blob got merged to another blob.
+                    assert!(donor_blob.recipient_blob != -1);
+                    donor_blob_id = donor_blob.recipient_blob;
+                }
+                let recipient_blob = &mut blobs.get_mut(&recipient_blob_id).unwrap();
+                recipient_blob.candidates.append(&mut donated_candidates);
+            }
+        }
+    }
+    // Return non-empty blobs. Note that the blob merging we just did will leave
+    // some empty entries in the `blobs` mapping.
+    let mut non_empty_blobs = Vec::<Blob>::new();
+    for (_id, blob) in blobs {
+        if !blob.candidates.is_empty() {
+            debug!("got blob {:?}", blob);
+            non_empty_blobs.push(blob);
+        }
+    }
+    info!("Found {} blobs in {:?}", non_empty_blobs.len(), blobs_start.elapsed());
+    non_empty_blobs
+}
 
+#[derive(Debug)]
+pub struct StarDescription {
+    // Location of star centroid in image coordinates. (0.5, 0.5) corresponds
+    // to the center of the image's upper left pixel.
+    pub centroid_x: f32,
+    pub centroid_y: f32,
 
+    // Characterizes the extent or spread of the star in each direction, in
+    // pixel units.
+    pub stddev_x: f32,
+    pub stddev_y: f32,
 
-    let mut results: Vec<StarDescription> = Vec::new();
+    // Sum of the u8 pixel values of the star's region. The estimated background
+    // is subtracted before the summing.
+    pub sum: f32,
+}
 
-    info!("Found {} centroids in {:?}",
-          results.len(), get_centroids_start.elapsed());
-    results
+fn get_star_from_blob(blob: &Blob, image: &GrayImage, sigma: f32,
+                      max_width: u32, max_height: u32) -> Option<StarDescription> {
+    let mut x_min = u32::MAX;
+    let mut x_max = 0_u32;
+    let mut y_min = u32::MAX;
+    let mut y_max = 0_u32;
+    for candidate in &blob.candidates {
+        x_min = cmp::min(x_min, candidate.x as u32);
+        x_max = cmp::max(x_max, candidate.x as u32);
+        y_min = cmp::min(y_min, candidate.y as u32);
+        y_max = cmp::max(y_max, candidate.y as u32);
+    }
+    let blob_width: u32 = x_max - x_min + 1;
+    let blob_height: u32 = y_max - y_min + 1;
+    // Reject blob if it is too big.
+    if blob_width > max_width || blob_height > max_height {
+        debug!("Blob too large at WxH {}x{}", blob_width, blob_height);
+        return None;
+    }
+    // Expand box by a two pixel border in all directions.
+    x_min -= 2;
+    x_max += 2;
+    y_min -= 2;
+    y_max += 2;
+    debug!("blob x range: {}-{}", x_min, x_max);
+    debug!("blob y range: {}-{}", y_min, y_max);
+    for row in y_min..y_max+1 {
+        let mut values = Vec::<String>::new();
+        for col in x_min..x_max+1 {
+            values.push(format!("{}", image.get_pixel(col as u32, row as u32).0[0]));
+        }
+        debug!("{} ", values.join(" "));
+    }
+
+    // Gather the pixel values from the outer perimeter. These are used to
+    // estimate the background and noise level.
+    let mut perimeter_pixels = Vec::<f64>::new();
+    for x in x_min..x_max+1 {
+        perimeter_pixels.push(image.get_pixel(x, y_min).0[0] as f64);
+        perimeter_pixels.push(image.get_pixel(x, y_max).0[0] as f64);
+    }
+    for y in y_min+1..y_max {
+        perimeter_pixels.push(image.get_pixel(x_min, y).0[0] as f64);
+        perimeter_pixels.push(image.get_pixel(x_max, y).0[0] as f64);
+    }
+    debug!("perimeter: {:?} ", perimeter_pixels);
+    let background_est: f64 = perimeter_pixels.iter().sum::<f64>() /
+        perimeter_pixels.len() as f64;
+    debug!("background: {} ", background_est);
+    let mut noise_est: f64 = (perimeter_pixels.iter().map(
+        |&x| (x - background_est) * (x - background_est))
+                          .sum::<f64>() / perimeter_pixels.len() as f64).sqrt();
+    if noise_est < 1.0 {
+        // Likely the image background is crushed to black.
+        noise_est = 1.0;
+    }
+    debug!("noise: {} ", noise_est);
+
+    // Process the interior pixels to obtain moments.
+    let mut m0: f64 = 0.0;
+    let mut m1x: f64 = 0.0;
+    let mut m1y: f64 = 0.0;
+    for y in y_min+1..y_max {
+        for x in x_min+1..x_max {
+            let val = image.get_pixel(x, y).0[0] as f64 - background_est;
+            m0 += val;
+            m1x += x as f64 * val;
+            m1y += y as f64 * val;
+        }
+    }
+    // See if the integrated background adjusted brightness exceeds the
+    // sigma*noise_est by enough.
+    if m0 < sigma as f64 * noise_est as f64 {
+        debug!("Blob too weak");
+        return None;
+    }
+    // We use simple center-of-mass as the centroid.
+    let centroid_x = m1x / m0;
+    let centroid_y = m1y / m0;
+    // Compute second moment about the centroid.
+    let mut m2x_c: f64 = 0.0;
+    let mut m2y_c: f64 = 0.0;
+    for y in y_min+1..y_max {
+        for x in x_min+1..x_max {
+            let val = image.get_pixel(x, y).0[0] as f64 - background_est;
+            m2x_c += (x as f64 - centroid_x) * (x as f64 - centroid_x) * val;
+            m2y_c += (y as f64 - centroid_y) * (y as f64 - centroid_y) * val;
+        }
+    }
+    let variance_x = m2x_c / m0;
+    let variance_y = m2y_c / m0;
+    debug!("centroid x,y {},{}; variance x,y {},{}",
+           centroid_x, centroid_y, variance_x, variance_y);
+
+    Some(StarDescription{centroid_x: (centroid_x + 0.5) as f32,
+                         centroid_y: (centroid_y + 0.5) as f32,
+                         stddev_x: variance_x.sqrt() as f32,
+                         stddev_y: variance_y.sqrt() as f32,
+                         sum: m0 as f32})
+}
+
+pub fn get_centroids_from_image(image: &GrayImage, sigma: f32)
+                                -> Vec<StarDescription> {
+    let (width, height) = image.dimensions();
+    info!("Image width x height: {}x{}", width, height);
+
+    let mut noise_estimate = estimate_noise_from_image(image);
+    if noise_estimate < 1.0 {
+        // Likely the image background is crushed to black.
+        noise_estimate = 1.0;
+    }
+    let candidates = scan_rows_for_candidates(image, noise_estimate, sigma);
+    let blobs = form_blobs_from_candidates(candidates, height as i32);
+
+    let get_stars_start = Instant::now();
+    let mut stars: Vec<StarDescription> = Vec::new();
+    for blob in blobs {
+        match get_star_from_blob(&blob, image, sigma, 8, 8) {
+            Some(x) => stars.push(x),
+            None => ()
+        }
+    }
+    info!("Blob processing found {} stars in {:?}",
+          stars.len(), get_stars_start.elapsed());
+    stars
 }
