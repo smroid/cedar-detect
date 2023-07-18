@@ -17,7 +17,7 @@ fn main() {
     let mut img_u8 = img.into_luma8();
     let (width, height) = img_u8.dimensions();
 
-    let sigma = 5.0;
+    let sigma = 6.0;
     let mut candidates = get_centroids_from_image(&img_u8, sigma);
     candidates.sort_by(|a, b| b.sum.partial_cmp(&a.sum).unwrap());
 
@@ -26,29 +26,29 @@ fn main() {
         let x = candidate.centroid_x as u32;
         let y = candidate.centroid_y as u32;
         let grey = Luma::<u8>([127]);
-        if x > 5 {
+        if x > 6 {
             // Draw left tick.
-            img_u8.put_pixel(x - 3, y, grey);
             img_u8.put_pixel(x - 4, y, grey);
             img_u8.put_pixel(x - 5, y, grey);
+            img_u8.put_pixel(x - 6, y, grey);
         }
-        if x < width - 5 {
+        if x < width - 6 {
             // Draw right tick.
-            img_u8.put_pixel(x + 3, y, grey);
             img_u8.put_pixel(x + 4, y, grey);
             img_u8.put_pixel(x + 5, y, grey);
+            img_u8.put_pixel(x + 6, y, grey);
         }
-        if y > 5 {
+        if y > 6 {
             // Draw top tick.
-            img_u8.put_pixel(x, y - 3, grey);
             img_u8.put_pixel(x, y - 4, grey);
             img_u8.put_pixel(x, y - 5, grey);
+            img_u8.put_pixel(x, y - 6, grey);
         }
-        if y < height - 5 {
+        if y < height - 6 {
             // Draw bottom tick.
-            img_u8.put_pixel(x, y + 3, grey);
             img_u8.put_pixel(x, y + 4, grey);
             img_u8.put_pixel(x, y + 5, grey);
+            img_u8.put_pixel(x, y + 6, grey);
         }
     }
     img_u8.save(output_file).unwrap();

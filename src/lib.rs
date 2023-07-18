@@ -62,63 +62,69 @@ fn scan_rows_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
     let mut candidates: Vec<CandidateFromRowScan> = Vec::new();
 
     // TODO: shard the rows to multiple threads.
-    for rownum in 2..height-2 {
+    for rownum in 3..height-3 {
         // Get the slice of image_pixels corresponding to this row.
         let row_pixels: &[u8] = &image_pixels.as_slice()
             [(rownum * width) as usize .. ((rownum+1) * width) as usize];
-        // Slide a 5 pixel window across the row.
-        let mut center_x = 1;
-        for window in row_pixels.windows(5) {
+        // Slide a 7 pixel window across the row.
+        let mut center_x = 2;
+        for window in row_pixels.windows(7) {
             center_x += 1;
-            let left_border = window[0] as i16;
-            let left = window[1] as i16;
-            let center = window[2] as i16;
-            let right = window[3] as i16;
-            let right_border = window[4] as i16;
+            let lb = window[0] as i16;  // Left border.
+            let ll = window[1] as i16;  // Second left neighbor.
+            let l = window[2] as i16;   // Left neighbor.
+            let c = window[3] as i16;   // Center.
+            let r = window[4] as i16;   // Right neighbor.
+            let rr = window[5] as i16;  // Second right neighbor.
+            let rb = window[6] as i16;  // Right border.
             // Center pixel must be at least as bright as its immediate left/right
             // neighbors.
-            if left > center || center < right {
+            if l > c || c < r {
                 continue;
             }
-            // Center pixel must be strictly brighter than both border pixels.
-            if left_border >= center || center <= right_border {
+            // Center pixel must be strictly brighter than its second left/right
+            // neighbors.
+            if ll >= c || c <= rr {
                 continue;
             }
-            if left == center {
+            // Center pixel must be strictly brighter than the borders.
+            if lb >= c || c <= rb {
+                continue;
+            }
+            if l == c {
                 // Break tie between left and center.
-                if left_border > right {
+                if ll > r {
                     // Left will have been the center of its own candidate entry.
                     continue;
                 }
             }
-            if right == center {
+            if c == r {
                 // Break tie between center and right.
-                if left <= right_border {
+                if l <= rr {
                     // Right will be the center of its own candidate entry.
                     continue;
                 }
             }
+            // We require the border pixels to be ~uniformly dark. See if there
+            // is too much brightness difference between the border pixels.
+            let border_diff = (lb - rb).abs();
+            if border_diff as f64 > 0.5 * sigma as f64 * noise_estimate as f64 {
+                continue;
+            }
             // Center pixel must be sigma * estimated noise brighter than
             // the estimated background.
-            let center_2 = 2 * center;
-            let est_background_2 = left_border + right_border;
+            let center_2 = 2 * c;
+            let est_background_2 = lb + rb;
             let est_noise_2 = 2.0 * noise_estimate;
             let center_over_background_2 = center_2 - est_background_2;
             if center_over_background_2 < (sigma * est_noise_2 as f32) as i16 {
                 continue;
             }
-            // Sum of left+right pixels must be sigma * estimated noise
-            // brighter than the estimated background.
-            let sum_neighbors_over_background = left + right - est_background_2;
-            if sum_neighbors_over_background < (sigma * noise_estimate as f32) as i16 {
-                continue;
-            }
-            // To guard against being at a bright spot in an extended object such
-            // as the moon, we require the center pixel to not just be
-            // arithmetically above the background, but also to be a ratio higher
-            // than the left_border and right_border background pixels.
-            let frac_center = center * 3 / 4;
-            if frac_center < left_border || frac_center < right_border {
+            // Average of l+r must be 0.5 * sigma * estimated noise brighter
+            // than the estimated background.
+            let sum_neighbors_over_background = l + r - est_background_2;
+            if sum_neighbors_over_background <
+                (sigma * noise_estimate as f32) as i16 {
                 continue;
             }
 
@@ -164,6 +170,9 @@ fn form_blobs_from_candidates(candidates: Vec<CandidateFromRowScan>, height: i32
             LabeledCandidate{candidate, blob_id: next_blob_id});
         next_blob_id += 1;
     }
+
+    // TODO: blobs can be adjacent within a row
+    // TODO: broaden the overlap width.
 
     // Merge adjacent blobs. Within a row blobs are not adjacent (by definition of
     // how row scanning identifies candidates), so we just need to look for vertical
@@ -229,12 +238,17 @@ pub struct StarDescription {
     pub stddev_x: f32,
     pub stddev_y: f32,
 
+    // TODO: other moments for elongation and angle.
+
     // Sum of the u8 pixel values of the star's region. The estimated background
     // is subtracted before the summing.
     pub sum: f32,
+
+    // TODO: count of saturated pixels.
 }
 
-fn get_star_from_blob(blob: &Blob, image: &GrayImage, sigma: f32,
+fn get_star_from_blob(blob: &Blob, image: &GrayImage,
+                      noise_estimate: f32, sigma: f32,
                       max_width: u32, max_height: u32) -> Option<StarDescription> {
     let mut x_min = u32::MAX;
     let mut x_max = 0_u32;
@@ -253,23 +267,23 @@ fn get_star_from_blob(blob: &Blob, image: &GrayImage, sigma: f32,
         debug!("Blob too large at WxH {}x{}", blob_width, blob_height);
         return None;
     }
-    // Expand box by a two pixel border in all directions.
-    x_min -= 2;
-    x_max += 2;
-    y_min -= 2;
-    y_max += 2;
+    // Expand box by a three pixel border in all directions.
+    x_min -= 3;
+    x_max += 3;
+    y_min -= 3;
+    y_max += 3;
     debug!("blob x range: {}-{}", x_min, x_max);
     debug!("blob y range: {}-{}", y_min, y_max);
-    for row in y_min..y_max+1 {
-        let mut values = Vec::<String>::new();
-        for col in x_min..x_max+1 {
-            values.push(format!("{}", image.get_pixel(col as u32, row as u32).0[0]));
-        }
-        debug!("{} ", values.join(" "));
-    }
+    // for row in y_min..y_max+1 {
+    //     let mut values = Vec::<String>::new();
+    //     for col in x_min..x_max+1 {
+    //         values.push(format!("{}", image.get_pixel(col as u32, row as u32).0[0]));
+    //     }
+    //     debug!("{} ", values.join(" "));
+    // }
 
     // Gather the pixel values from the outer perimeter. These are used to
-    // estimate the background and noise level.
+    // estimate the background.
     let mut perimeter_pixels = Vec::<f64>::new();
     for x in x_min..x_max+1 {
         perimeter_pixels.push(image.get_pixel(x, y_min).0[0] as f64);
@@ -283,21 +297,25 @@ fn get_star_from_blob(blob: &Blob, image: &GrayImage, sigma: f32,
     let background_est: f64 = perimeter_pixels.iter().sum::<f64>() /
         perimeter_pixels.len() as f64;
     debug!("background: {} ", background_est);
-    let mut noise_est: f64 = (perimeter_pixels.iter().map(
-        |&x| (x - background_est) * (x - background_est))
-                          .sum::<f64>() / perimeter_pixels.len() as f64).sqrt();
-    if noise_est < 1.0 {
-        // Likely the image background is crushed to black.
-        noise_est = 1.0;
+
+    // We require the perimeter pixels to be ~uniformly dark. See if any
+    // perimeter pixel is too bright compared to the darkest perimeter
+    // pixel.
+    let perimeter_min =
+        perimeter_pixels.iter().min_by(|a, b| a.total_cmp(b)).unwrap();
+    let perimeter_max =
+        perimeter_pixels.iter().max_by(|a, b| a.total_cmp(b)).unwrap();
+    if perimeter_max - perimeter_min > sigma as f64 * noise_estimate as f64 {
+        debug!("Border too varied");
+        return None;
     }
-    debug!("noise: {} ", noise_est);
 
     // Process the interior pixels to obtain moments.
     let mut m0: f64 = 0.0;
     let mut m1x: f64 = 0.0;
     let mut m1y: f64 = 0.0;
-    for y in y_min+1..y_max {
-        for x in x_min+1..x_max {
+    for y in y_min+2..y_max-1 {
+        for x in x_min+2..x_max-1 {
             let val = image.get_pixel(x, y).0[0] as f64 - background_est;
             m0 += val;
             m1x += x as f64 * val;
@@ -305,8 +323,8 @@ fn get_star_from_blob(blob: &Blob, image: &GrayImage, sigma: f32,
         }
     }
     // See if the integrated background adjusted brightness exceeds the
-    // sigma*noise_est by enough.
-    if m0 < sigma as f64 * noise_est as f64 {
+    // sigma*noise by enough.
+    if m0 < sigma as f64 * noise_estimate as f64 {
         debug!("Blob too weak");
         return None;
     }
@@ -316,8 +334,8 @@ fn get_star_from_blob(blob: &Blob, image: &GrayImage, sigma: f32,
     // Compute second moment about the centroid.
     let mut m2x_c: f64 = 0.0;
     let mut m2y_c: f64 = 0.0;
-    for y in y_min+1..y_max {
-        for x in x_min+1..x_max {
+    for y in y_min+2..y_max-1 {
+        for x in x_min+2..x_max-1 {
             let val = image.get_pixel(x, y).0[0] as f64 - background_est;
             m2x_c += (x as f64 - centroid_x) * (x as f64 - centroid_x) * val;
             m2y_c += (y as f64 - centroid_y) * (y as f64 - centroid_y) * val;
@@ -351,7 +369,7 @@ pub fn get_centroids_from_image(image: &GrayImage, sigma: f32)
     let get_stars_start = Instant::now();
     let mut stars: Vec<StarDescription> = Vec::new();
     for blob in blobs {
-        match get_star_from_blob(&blob, image, sigma, 8, 8) {
+        match get_star_from_blob(&blob, image, noise_estimate, sigma, 8, 8) {
             Some(x) => stars.push(x),
             None => ()
         }
