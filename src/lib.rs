@@ -171,9 +171,6 @@ fn form_blobs_from_candidates(candidates: Vec<CandidateFromRowScan>, height: i32
         next_blob_id += 1;
     }
 
-    // TODO: blobs can be adjacent within a row
-    // TODO: broaden the overlap width.
-
     // Merge adjacent blobs. Within a row blobs are not adjacent (by definition of
     // how row scanning identifies candidates), so we just need to look for vertical
     // adjacencies.
@@ -238,18 +235,18 @@ pub struct StarDescription {
     pub stddev_x: f32,
     pub stddev_y: f32,
 
-    // TODO: other moments for elongation and angle.
-
     // Sum of the u8 pixel values of the star's region. The estimated background
     // is subtracted before the summing.
     pub sum: f32,
 
-    // TODO: count of saturated pixels.
+    // Count of saturated pixel values.
+    pub num_saturated: i32,
 }
 
 fn get_star_from_blob(blob: &Blob, image: &GrayImage,
                       noise_estimate: f32, sigma: f32,
                       max_width: u32, max_height: u32) -> Option<StarDescription> {
+    // Compute the bounding box of all of the blob's center coords.
     let mut x_min = u32::MAX;
     let mut x_max = 0_u32;
     let mut y_min = u32::MAX;
@@ -260,14 +257,18 @@ fn get_star_from_blob(blob: &Blob, image: &GrayImage,
         y_min = cmp::min(y_min, candidate.y as u32);
         y_max = cmp::max(y_max, candidate.y as u32);
     }
-    let blob_width: u32 = x_max - x_min + 1;
-    let blob_height: u32 = y_max - y_min + 1;
+    let core_x_min = x_min;
+    let core_x_max = x_max;
+    let core_y_min = y_min;
+    let core_y_max = y_max;
+    let core_width: u32 = core_x_max - core_x_min + 1;
+    let core_height: u32 = core_y_max - core_y_min + 1;
     // Reject blob if it is too big.
-    if blob_width > max_width || blob_height > max_height {
-        debug!("Blob too large at WxH {}x{}", blob_width, blob_height);
+    if core_width > max_width || core_height > max_height {
+        debug!("Blob too large at WxH {}x{}", core_width, core_height);
         return None;
     }
-    // Expand box by a three pixel border in all directions.
+    // Expand bounding box by a three pixel border in all directions.
     x_min -= 3;
     x_max += 3;
     y_min -= 3;
@@ -306,27 +307,41 @@ fn get_star_from_blob(blob: &Blob, image: &GrayImage,
     let perimeter_max =
         perimeter_pixels.iter().max_by(|a, b| a.total_cmp(b)).unwrap();
     if perimeter_max - perimeter_min > sigma as f64 * noise_estimate as f64 {
-        debug!("Border too varied");
+        debug!("Perimeter too varied");
         return None;
     }
 
-    // Process the interior pixels to obtain moments.
+    // Take average of pixels in core, verify that core exceeds background
+    // by sigma * noise.
+    let mut core_sum: i32 = 0;
+    for y in core_y_min..core_y_max+1 {
+        for x in core_x_min..core_x_max+1 {
+            core_sum += image.get_pixel(x, y).0[0] as i32;
+        }
+    }
+    let core_mean = core_sum as f64 / (core_width * core_height) as f64;
+    if core_mean - background_est < sigma as f64 * noise_estimate as f64 {
+        debug!("Core too weak");
+        return None;
+    }
+
+    // Process the interior pixels (core plus one surrounding ring) to
+    // obtain moments. Also count the saturated pixels.
+    let mut num_saturated = 0;
     let mut m0: f64 = 0.0;
     let mut m1x: f64 = 0.0;
     let mut m1y: f64 = 0.0;
     for y in y_min+2..y_max-1 {
         for x in x_min+2..x_max-1 {
-            let val = image.get_pixel(x, y).0[0] as f64 - background_est;
-            m0 += val;
-            m1x += x as f64 * val;
-            m1y += y as f64 * val;
+            let val = image.get_pixel(x, y).0[0];
+            if val == 255 {
+                num_saturated += 1;
+            }
+            let val_minus_bkg = val as f64 - background_est;
+            m0 += val_minus_bkg;
+            m1x += x as f64 * val_minus_bkg;
+            m1y += y as f64 * val_minus_bkg;
         }
-    }
-    // See if the integrated background adjusted brightness exceeds the
-    // sigma*noise by enough.
-    if m0 < sigma as f64 * noise_estimate as f64 {
-        debug!("Blob too weak");
-        return None;
     }
     // We use simple center-of-mass as the centroid.
     let centroid_x = m1x / m0;
@@ -350,7 +365,8 @@ fn get_star_from_blob(blob: &Blob, image: &GrayImage,
                          centroid_y: (centroid_y + 0.5) as f32,
                          stddev_x: variance_x.sqrt() as f32,
                          stddev_y: variance_y.sqrt() as f32,
-                         sum: m0 as f32})
+                         sum: m0 as f32,
+                         num_saturated})
 }
 
 pub fn get_centroids_from_image(image: &GrayImage, sigma: f32)
