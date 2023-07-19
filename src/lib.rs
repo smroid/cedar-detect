@@ -5,6 +5,62 @@ use std::time::Instant;
 use image::GrayImage;
 use log::{debug, info};
 
+// An iterator over the pixels of a region of interest. Yields pixels
+// in raster scan order.
+struct RegionOfInterest<'a> {
+    image: &'a GrayImage,
+    // Coordinates to iterate over, inclusive.
+    min_x: u32,
+    max_x: u32,
+    min_y: u32,
+    max_y: u32,
+    include_interior: bool,
+
+    cur_x: u32,
+    cur_y: u32,
+}
+
+impl<'a> RegionOfInterest<'a> {
+    fn new(image: &/*'a*/ GrayImage,
+           min_x: u32, max_x: u32, min_y: u32, max_y: u32,
+           include_interior: bool) -> RegionOfInterest {
+        let (width, height) = image.dimensions();
+        assert!(max_x >= min_x);
+        assert!(max_y >= min_y);
+        assert!(max_x < width);
+        assert!(max_y < height);
+        RegionOfInterest{image, min_x, max_x, min_y, max_y, include_interior,
+                         cur_x: min_x, cur_y: min_y}
+    }
+}
+
+impl<'a> Iterator for RegionOfInterest<'a> {
+    type Item = (u8, u32, u32);  // Pixel value, x, y.
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.cur_y > self.max_y {
+            return None;
+        }
+        let item:Self::Item = (self.image.get_pixel(self.cur_x, self.cur_y).0[0],
+                               self.cur_x, self.cur_y);
+        if self.cur_x == self.max_x {
+            self.cur_x = self.min_x;
+            self.cur_y += 1;
+        } else {
+            let do_all_in_row = self.include_interior ||
+                self.cur_y == self.min_y || self.cur_y == self.max_y;
+            if do_all_in_row {
+                self.cur_x += 1;
+            } else {
+                // Exclude interior.
+                assert!(self.cur_x == self.min_x);
+                self.cur_x = self.max_x;
+            }
+        }
+        Some(item)
+    }
+}
+
 fn estimate_noise_from_image(image: &GrayImage) -> f32 {
     let noise_start = Instant::now();
     let (width, height) = image.dimensions();
@@ -17,11 +73,11 @@ fn estimate_noise_from_image(image: &GrayImage) -> f32 {
     let start_x = width / 2 - box_size / 2;
     let start_y = height / 2 - box_size / 2;
     let mut histogram: [i32; 256] = [0; 256];
-    for y in start_y..start_y+box_size {
-        for x in start_x..start_x+box_size {
-            let pixel_value = image.get_pixel(x, y);
-            histogram[pixel_value.0[0] as usize] += 1;
-        }
+    for (pixel_value, _x, _y) in
+        RegionOfInterest::new(image, start_x, start_x + box_size - 1,
+                              start_y, start_y + box_size - 1,
+                              /*include_interior=*/true) {
+        histogram[pixel_value as usize] += 1;
     }
     debug!("Histogram: {:?}", histogram);
     // Discard the top 5% of the histogram. We want only non-star pixels
@@ -120,11 +176,11 @@ fn scan_rows_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
             if center_over_background_2 < (sigma * est_noise_2 as f32) as i16 {
                 continue;
             }
-            // Average of l+r must be 0.5 * sigma * estimated noise brighter
+            // Average of l+r must be 0.25 * sigma * estimated noise brighter
             // than the estimated background.
             let sum_neighbors_over_background = l + r - est_background_2;
             if sum_neighbors_over_background <
-                (sigma * noise_estimate as f32) as i16 {
+                (0.5 * sigma * noise_estimate as f32) as i16 {
                 continue;
             }
 
@@ -182,10 +238,10 @@ fn form_blobs_from_candidates(candidates: Vec<CandidateFromRowScan>, height: i32
             // This is fast since rows usually have very few candidates.
             for prev_row_rc in &labeled_candidates_by_row[rownum - 1] {
                 let prev_row_rc_pos = prev_row_rc.candidate.x;
-                if prev_row_rc_pos <= rc_pos - 3 {
+                if prev_row_rc_pos < rc_pos - 3 {
                     continue;
                 }
-                if prev_row_rc_pos >= rc_pos + 3 {
+                if prev_row_rc_pos > rc_pos + 3 {
                     break;
                 }
                 // Adjacent to a candidate in the previous row. Absorb the previous
@@ -231,7 +287,7 @@ pub struct StarDescription {
     pub centroid_y: f32,
 
     // Characterizes the extent or spread of the star in each direction, in
-    // pixel units.
+    // pixel size units.
     pub stddev_x: f32,
     pub stddev_y: f32,
 
@@ -268,80 +324,121 @@ fn get_star_from_blob(blob: &Blob, image: &GrayImage,
         debug!("Blob too large at WxH {}x{}", core_width, core_height);
         return None;
     }
-    // Expand bounding box by a three pixel border in all directions.
+    // Expand core bounding box by a three pixel border in all directions.
     x_min -= 3;
     x_max += 3;
     y_min -= 3;
     y_max += 3;
     debug!("blob x range: {}-{}", x_min, x_max);
     debug!("blob y range: {}-{}", y_min, y_max);
-    // for row in y_min..y_max+1 {
-    //     let mut values = Vec::<String>::new();
-    //     for col in x_min..x_max+1 {
-    //         values.push(format!("{}", image.get_pixel(col as u32, row as u32).0[0]));
-    //     }
-    //     debug!("{} ", values.join(" "));
-    // }
 
-    // Gather the pixel values from the outer perimeter. These are used to
-    // estimate the background.
-    let mut perimeter_pixels = Vec::<f64>::new();
-    for x in x_min..x_max+1 {
-        perimeter_pixels.push(image.get_pixel(x, y_min).0[0] as f64);
-        perimeter_pixels.push(image.get_pixel(x, y_max).0[0] as f64);
+    // Compute average of pixels in core.
+    let mut core_sum: i32 = 0;
+    let mut core_count: i32 = 0;
+    for (pixel_value, _x, _y) in RegionOfInterest::new(
+        image, core_x_min, core_x_max, core_y_min, core_y_max,
+        /*include_interior=*/true) {
+        core_sum += pixel_value as i32;
+        core_count += 1;
     }
-    for y in y_min+1..y_max {
-        perimeter_pixels.push(image.get_pixel(x_min, y).0[0] as f64);
-        perimeter_pixels.push(image.get_pixel(x_max, y).0[0] as f64);
+    let core_mean = core_sum as f64 / core_count as f64;
+
+    // Compute average of pixels in box immediately surrounding core,
+    // excluding corner pixels.
+    let mut neighbor_sum: i32 = 0;
+    let mut neighbor_count: i32 = 0;
+    for (pixel_value, x, y) in RegionOfInterest::new(
+        image, core_x_min - 1, core_x_max + 1, core_y_min - 1, core_y_max + 1,
+        /*include_interior=*/false) {
+        if (x == core_x_min - 1 || x == core_x_max + 1) &&
+            (y == core_y_min - 1 || y == core_y_max + 1) {
+            continue;
+        }
+        neighbor_sum += pixel_value as i32;
+        neighbor_count += 1;
     }
-    debug!("perimeter: {:?} ", perimeter_pixels);
-    let background_est: f64 = perimeter_pixels.iter().sum::<f64>() /
-        perimeter_pixels.len() as f64;
+    let neighbor_mean = neighbor_sum as f64 / neighbor_count as f64;
+    // Core average must be at least as bright as the neighbor average.
+    if core_mean < neighbor_mean {
+        debug!("Core average {} is less than neighbor average {}",
+               core_mean, neighbor_mean);
+        return None;
+    }
+
+    // Compute average of pixels in next box out; this is one pixel
+    // inward from the outer perimeter.
+    let mut margin_sum: i32 = 0;
+    let mut margin_count: i32 = 0;
+    for (pixel_value, _x, _y) in RegionOfInterest::new(
+        image, core_x_min - 2, core_x_max + 2, core_y_min - 2, core_y_max + 2,
+        /*include_interior=*/false) {
+        margin_sum += pixel_value as i32;
+        margin_count += 1;
+    }
+    let margin_mean = margin_sum as f64 / margin_count as f64;
+    // Core average must be strictly brighter than the margin average.
+    if core_mean <= margin_mean {
+        debug!("Core average {} is not greater than margin average {}",
+               core_mean, margin_mean);
+        return None;
+    }
+
+    // Gather information from the outer perimeter. These pixels represent
+    // the background.
+    let mut perimeter_sum: i32 = 0;
+    let mut perimeter_count: i32 = 0;
+    let mut perimeter_min = u8::MAX;
+    let mut perimeter_max = 0_u8;
+    for (pixel_value, _x, _y) in RegionOfInterest::new(
+        image, x_min, x_max, y_min, y_max, /*include_interior=*/false) {
+        perimeter_sum += pixel_value as i32;
+        perimeter_count += 1;
+        perimeter_min = cmp::min(perimeter_min, pixel_value);
+        perimeter_max = cmp::max(perimeter_max, pixel_value);
+    }
+    let background_est = perimeter_sum as f64 / perimeter_count as f64;
     debug!("background: {} ", background_est);
 
     // We require the perimeter pixels to be ~uniformly dark. See if any
     // perimeter pixel is too bright compared to the darkest perimeter
     // pixel.
-    let perimeter_min =
-        perimeter_pixels.iter().min_by(|a, b| a.total_cmp(b)).unwrap();
-    let perimeter_max =
-        perimeter_pixels.iter().max_by(|a, b| a.total_cmp(b)).unwrap();
-    if perimeter_max - perimeter_min > sigma as f64 * noise_estimate as f64 {
+    if perimeter_max as f64 - perimeter_min as f64 >
+        sigma as f64 * noise_estimate as f64 {
         debug!("Perimeter too varied");
         return None;
     }
 
-    // Take average of pixels in core, verify that core exceeds background
-    // by sigma * noise.
-    let mut core_sum: i32 = 0;
-    for y in core_y_min..core_y_max+1 {
-        for x in core_x_min..core_x_max+1 {
-            core_sum += image.get_pixel(x, y).0[0] as i32;
-        }
-    }
-    let core_mean = core_sum as f64 / (core_width * core_height) as f64;
+    // Verify that core average exceeds background by sigma * noise.
     if core_mean - background_est < sigma as f64 * noise_estimate as f64 {
         debug!("Core too weak");
         return None;
     }
+    // Verify that the neighbor average exceeds background by
+    // 0.25 * sigma * noise.
+    if neighbor_mean - background_est < 0.25 * sigma as f64 * noise_estimate as f64 {
+        debug!("Neighbors too weak");
+        return None;
+    }
 
-    // Process the interior pixels (core plus one surrounding ring) to
-    // obtain moments. Also count the saturated pixels.
+    // Star passes all of the gates!
+
+    // Process the interior pixels (core plus immediate neighbors) to
+    // obtain moments. Also note the count of saturated pixels.
     let mut num_saturated = 0;
     let mut m0: f64 = 0.0;
     let mut m1x: f64 = 0.0;
     let mut m1y: f64 = 0.0;
-    for y in y_min+2..y_max-1 {
-        for x in x_min+2..x_max-1 {
-            let val = image.get_pixel(x, y).0[0];
-            if val == 255 {
-                num_saturated += 1;
-            }
-            let val_minus_bkg = val as f64 - background_est;
-            m0 += val_minus_bkg;
-            m1x += x as f64 * val_minus_bkg;
-            m1y += y as f64 * val_minus_bkg;
+    for (pixel_value, x, y) in RegionOfInterest::new(
+        image, core_x_min - 1, core_x_max + 1,
+        core_y_min - 1, core_y_max + 1,
+        /*include_interior=*/true) {
+        if pixel_value == 255 {
+            num_saturated += 1;
         }
+        let val_minus_bkg = pixel_value as f64 - background_est;
+        m0 += val_minus_bkg;
+        m1x += x as f64 * val_minus_bkg;
+        m1y += y as f64 * val_minus_bkg;
     }
     // We use simple center-of-mass as the centroid.
     let centroid_x = m1x / m0;
@@ -349,12 +446,13 @@ fn get_star_from_blob(blob: &Blob, image: &GrayImage,
     // Compute second moment about the centroid.
     let mut m2x_c: f64 = 0.0;
     let mut m2y_c: f64 = 0.0;
-    for y in y_min+2..y_max-1 {
-        for x in x_min+2..x_max-1 {
-            let val = image.get_pixel(x, y).0[0] as f64 - background_est;
-            m2x_c += (x as f64 - centroid_x) * (x as f64 - centroid_x) * val;
-            m2y_c += (y as f64 - centroid_y) * (y as f64 - centroid_y) * val;
-        }
+    for (pixel_value, x, y) in RegionOfInterest::new(
+        image, core_x_min - 1, core_x_max + 1,
+        core_y_min - 1, core_y_max + 1,
+        /*include_interior=*/true) {
+        let val_minus_bkg = pixel_value as f64 - background_est;
+        m2x_c += (x as f64 - centroid_x) * (x as f64 - centroid_x) * val_minus_bkg;
+        m2y_c += (y as f64 - centroid_y) * (y as f64 - centroid_y) * val_minus_bkg;
     }
     let variance_x = m2x_c / m0;
     let variance_y = m2y_c / m0;
@@ -385,7 +483,7 @@ pub fn get_centroids_from_image(image: &GrayImage, sigma: f32)
     let get_stars_start = Instant::now();
     let mut stars: Vec<StarDescription> = Vec::new();
     for blob in blobs {
-        match get_star_from_blob(&blob, image, noise_estimate, sigma, 8, 8) {
+        match get_star_from_blob(&blob, image, noise_estimate, sigma, 5, 5) {
             Some(x) => stars.push(x),
             None => ()
         }
