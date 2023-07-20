@@ -80,7 +80,7 @@ fn estimate_noise_from_image(image: &GrayImage) -> f32 {
     // overall values. Goal: avoid doing noise stats on e.g. the moon.
     let start_x = width / 2 - box_size / 2;
     let start_y = height / 2 - box_size / 2;
-    let mut histogram: [i32; 256] = [0; 256];
+    let mut histogram: [u32; 256] = [0; 256];
     for (_x, _y, pixel_value) in
         EnumeratePixels::new(image, RegionOfInterest{x: start_x, y: start_y,
                                                      width: box_size, height: box_size},
@@ -90,7 +90,7 @@ fn estimate_noise_from_image(image: &GrayImage) -> f32 {
     debug!("Histogram: {:?}", histogram);
     // Discard the top 5% of the histogram. We want only background pixels
     // to contribute to the noise estimate.
-    let keep_count: i32 = (box_size * box_size * 95 / 100) as i32;
+    let keep_count = (box_size * box_size * 95 / 100) as u32;
     let mut kept_so_far = 0;
     let mut first_moment = 0;
     for h in 0..256 {
@@ -99,7 +99,7 @@ fn estimate_noise_from_image(image: &GrayImage) -> f32 {
             histogram[h] = keep_count - kept_so_far;
         }
         kept_so_far += histogram[h];
-        first_moment += histogram[h] * h as i32;
+        first_moment += histogram[h] * h as u32;
     }
     let mean = first_moment as f64 / keep_count as f64;
     let mut second_moment: f64 = 0.0;
@@ -117,8 +117,81 @@ struct CandidateFromRowScan {
     y: i32,
 }
 
+// Returns pixel value to histogram. Care is taken to not return a hot pixel.
+fn check_window_for_candidate(window: &[u8], center_x: u32, rownum: u32,
+                              noise_estimate: f32, sigma: f32,
+                              candidates: &mut Vec<CandidateFromRowScan>)
+                              -> u8{
+    let lb = window[0] as i16;  // Left border.
+    let lm = window[1] as i16;  // Left margin.
+    let l = window[2] as i16;   // Left neighbor.
+    let c = window[3] as i16;   // Center.
+    let r = window[4] as i16;   // Right neighbor.
+    let rm = window[5] as i16;  // Right margin.
+    let rb = window[6] as i16;  // Right border.
+    let c8 = window[3];
+    // Center pixel must be at least as bright as its immediate left/right
+    // neighbors.
+    if l > c || c < r {
+        return c8;
+    }
+    // Center pixel must be strictly brighter than its second left/right
+    // neighbors.
+    if lm >= c || c <= rm {
+        return c8;
+    }
+    // Center pixel must be strictly brighter than the borders.
+    if lb >= c || c <= rb {
+        return c8;
+    }
+    if l == c {
+        // Break tie between left and center.
+        if lm > r {
+            // Left will have been the center of its own candidate entry.
+            return c8;
+        }
+    }
+    if c == r {
+        // Break tie between center and right.
+        if l <= rm {
+            // Right will be the center of its own candidate entry.
+            return c8;
+        }
+    }
+    // Average of l+r must be 0.25 * sigma * estimated noise brighter
+    // than the estimated background.
+    let est_background_2 = lb + rb;
+    let sum_neighbors_over_background = l + r - est_background_2;
+    if sum_neighbors_over_background <
+        (0.5 * sigma * noise_estimate as f32) as i16
+    {
+        // We infer that 'c' is a hot pixel.
+        return ((l + r) / 2) as u8;
+    }
+    // Center pixel must be sigma * estimated noise brighter than
+    // the estimated background.
+    let center_2 = 2 * c;
+    let est_noise_2 = 2.0 * noise_estimate;
+    let center_over_background_2 = center_2 - est_background_2;
+    if center_over_background_2 < (sigma * est_noise_2 as f32) as i16 {
+        return c8;
+    }
+    // We require the border pixels to be ~uniformly dark. See if there
+    // is too much brightness difference between the border pixels.
+    let border_diff = (lb - rb).abs();
+    if border_diff as f64 > 0.5 * sigma as f64 * noise_estimate as f64 {
+        return c8;
+    }
+
+    // We have a candidate star from our 1d analysis!
+    candidates.push(CandidateFromRowScan{x: center_x as i32, y: rownum as i32});
+    debug!("Candidate at row {} col {}; window {:?}", rownum, center_x, window);
+    return c8;
+}
+
 // The candidates are returned in raster scan order.
-fn scan_rows_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
+fn scan_rows_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32,
+                            histogram_roi: RegionOfInterest, histogram: &mut[u32; 256])
                             -> Vec<CandidateFromRowScan> {
     let row_scan_start = Instant::now();
     let (width, height) = image.dimensions();
@@ -131,70 +204,19 @@ fn scan_rows_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
         let row_pixels: &[u8] = &image_pixels.as_slice()
             [(rownum * width) as usize .. ((rownum+1) * width) as usize];
         // Slide a 7 pixel window across the row.
-        let mut center_x = 2;
+        let mut center_x = 2_u32;
         for window in row_pixels.windows(7) {
             center_x += 1;
-            let lb = window[0] as i16;  // Left border.
-            let ll = window[1] as i16;  // Second left neighbor.
-            let l = window[2] as i16;   // Left neighbor.
-            let c = window[3] as i16;   // Center.
-            let r = window[4] as i16;   // Right neighbor.
-            let rr = window[5] as i16;  // Second right neighbor.
-            let rb = window[6] as i16;  // Right border.
-            // Center pixel must be at least as bright as its immediate left/right
-            // neighbors.
-            if l > c || c < r {
-                continue;
+            let pixel_value = check_window_for_candidate(
+                window, center_x, rownum,
+                noise_estimate, sigma, &mut candidates);
+            if center_x >= histogram_roi.x &&
+                center_x < histogram_roi.x + histogram_roi.width &&
+                rownum >= histogram_roi.y &&
+                rownum < histogram_roi.y + histogram_roi.height
+            {
+                histogram[pixel_value as usize] += 1;
             }
-            // Center pixel must be strictly brighter than its second left/right
-            // neighbors.
-            if ll >= c || c <= rr {
-                continue;
-            }
-            // Center pixel must be strictly brighter than the borders.
-            if lb >= c || c <= rb {
-                continue;
-            }
-            if l == c {
-                // Break tie between left and center.
-                if ll > r {
-                    // Left will have been the center of its own candidate entry.
-                    continue;
-                }
-            }
-            if c == r {
-                // Break tie between center and right.
-                if l <= rr {
-                    // Right will be the center of its own candidate entry.
-                    continue;
-                }
-            }
-            // We require the border pixels to be ~uniformly dark. See if there
-            // is too much brightness difference between the border pixels.
-            let border_diff = (lb - rb).abs();
-            if border_diff as f64 > 0.5 * sigma as f64 * noise_estimate as f64 {
-                continue;
-            }
-            // Center pixel must be sigma * estimated noise brighter than
-            // the estimated background.
-            let center_2 = 2 * c;
-            let est_background_2 = lb + rb;
-            let est_noise_2 = 2.0 * noise_estimate;
-            let center_over_background_2 = center_2 - est_background_2;
-            if center_over_background_2 < (sigma * est_noise_2 as f32) as i16 {
-                continue;
-            }
-            // Average of l+r must be 0.25 * sigma * estimated noise brighter
-            // than the estimated background.
-            let sum_neighbors_over_background = l + r - est_background_2;
-            if sum_neighbors_over_background <
-                (0.5 * sigma * noise_estimate as f32) as i16 {
-                continue;
-            }
-
-            // We have a candidate star from our 1d analysis!
-            candidates.push(CandidateFromRowScan{x: center_x, y: rownum as i32});
-            debug!("Candidate at row {} col {}; window {:?}", rownum, center_x, window);
         }
     }
 
@@ -490,7 +512,14 @@ pub fn get_stars_from_image(image: &GrayImage, sigma: f32,
         // Likely the image background is crushed to black.
         noise_estimate = 1.0;
     }
-    let candidates = scan_rows_for_candidates(image, noise_estimate, sigma);
+    // While looking for star candidates, grab a histogram of the middle third
+    // (in each dimension) of the image.
+    let histogram_roi = RegionOfInterest{x: width / 3, y: height / 3,
+                                         width: width / 3, height: height / 3};
+    let mut histogram: [u32; 256] = [0; 256];
+    let candidates = scan_rows_for_candidates(image, noise_estimate, sigma,
+                                              histogram_roi, &mut histogram);
+    debug!("Central region histogram from scan: {:?}", histogram);
     let mut stars: Vec<StarDescription> = Vec::new();
     if return_candidates {
         for candidate in candidates {
