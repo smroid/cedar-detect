@@ -5,56 +5,64 @@ use std::time::Instant;
 use image::GrayImage;
 use log::{debug, info};
 
+#[derive(Copy, Clone, Debug)]
+pub struct RegionOfInterest {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl RegionOfInterest {
+    fn is_corner(&self, x: u32, y: u32) -> bool {
+        (x == self.x || x == self.x + self.width - 1) &&
+            (y == self.y || y == self.y + self.height - 1)
+    }
+}
+
 // An iterator over the pixels of a region of interest. Yields pixels
 // in raster scan order.
-struct RegionOfInterest<'a> {
+struct EnumeratePixels<'a> {
     image: &'a GrayImage,
-    // Coordinates to iterate over, inclusive.
-    min_x: u32,
-    max_x: u32,
-    min_y: u32,
-    max_y: u32,
+    roi: RegionOfInterest,
     include_interior: bool,
 
     cur_x: u32,
     cur_y: u32,
 }
 
-impl<'a> RegionOfInterest<'a> {
-    fn new(image: &/*'a*/ GrayImage,
-           min_x: u32, max_x: u32, min_y: u32, max_y: u32,
-           include_interior: bool) -> RegionOfInterest {
+impl<'a> EnumeratePixels<'a> {
+    fn new(image: &/*'a*/ GrayImage, roi: RegionOfInterest, include_interior: bool)
+           -> EnumeratePixels {
         let (width, height) = image.dimensions();
-        assert!(max_x >= min_x);
-        assert!(max_y >= min_y);
-        assert!(max_x < width);
-        assert!(max_y < height);
-        RegionOfInterest{image, min_x, max_x, min_y, max_y, include_interior,
-                         cur_x: min_x, cur_y: min_y}
+        assert!(roi.x + roi.width < width);
+        assert!(roi.y + roi.height < height);
+        EnumeratePixels{image, roi, include_interior, cur_x: roi.x, cur_y: roi.y}
     }
 }
 
-impl<'a> Iterator for RegionOfInterest<'a> {
-    type Item = (u8, u32, u32);  // Pixel value, x, y.
+impl<'a> Iterator for EnumeratePixels<'a> {
+    type Item = (u32, u32, u8);  // X, y, pixel value.
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.cur_y > self.max_y {
+        if self.cur_y > self.roi.y + self.roi.height - 1 {
             return None;
         }
-        let item:Self::Item = (self.image.get_pixel(self.cur_x, self.cur_y).0[0],
-                               self.cur_x, self.cur_y);
-        if self.cur_x == self.max_x {
-            self.cur_x = self.min_x;
+        let item:Self::Item = (self.cur_x, self.cur_y,
+                               self.image.get_pixel(self.cur_x, self.cur_y).0[0]);
+        if self.cur_x == self.roi.x + self.roi.width - 1 {
+            self.cur_x = self.roi.x;
             self.cur_y += 1;
         } else {
             let do_all_in_row = self.include_interior ||
-                self.cur_y == self.min_y || self.cur_y == self.max_y;
+                self.cur_y == self.roi.y ||
+                self.cur_y == self.roi.y + self.roi.height - 1;
             if do_all_in_row {
                 self.cur_x += 1;
             } else {
                 // Exclude interior.
-                assert!(self.cur_x == self.min_x);
-                self.cur_x = self.max_x;
+                assert!(self.cur_x == self.roi.x);
+                self.cur_x = self.roi.x + self.roi.width - 1;
             }
         }
         Some(item)
@@ -73,14 +81,14 @@ fn estimate_noise_from_image(image: &GrayImage) -> f32 {
     let start_x = width / 2 - box_size / 2;
     let start_y = height / 2 - box_size / 2;
     let mut histogram: [i32; 256] = [0; 256];
-    for (pixel_value, _x, _y) in
-        RegionOfInterest::new(image, start_x, start_x + box_size - 1,
-                              start_y, start_y + box_size - 1,
-                              /*include_interior=*/true) {
+    for (_x, _y, pixel_value) in
+        EnumeratePixels::new(image, RegionOfInterest{x: start_x, y: start_y,
+                                                     width: box_size, height: box_size},
+                             /*include_interior=*/true) {
         histogram[pixel_value as usize] += 1;
     }
     debug!("Histogram: {:?}", histogram);
-    // Discard the top 5% of the histogram. We want only non-star pixels
+    // Discard the top 5% of the histogram. We want only background pixels
     // to contribute to the noise estimate.
     let keep_count: i32 = (box_size * box_size * 95 / 100) as i32;
     let mut kept_so_far = 0;
@@ -118,7 +126,7 @@ fn scan_rows_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
     let mut candidates: Vec<CandidateFromRowScan> = Vec::new();
 
     // TODO: shard the rows to multiple threads.
-    for rownum in 3..height-3 {
+    for rownum in 0..height {
         // Get the slice of image_pixels corresponding to this row.
         let row_pixels: &[u8] = &image_pixels.as_slice()
             [(rownum * width) as usize .. ((rownum+1) * width) as usize];
@@ -302,6 +310,7 @@ pub struct StarDescription {
 fn get_star_from_blob(blob: &Blob, image: &GrayImage,
                       noise_estimate: f32, sigma: f32,
                       max_width: u32, max_height: u32) -> Option<StarDescription> {
+    let (image_width, image_height) = image.dimensions();
     // Compute the bounding box of all of the blob's center coords.
     let mut x_min = u32::MAX;
     let mut x_max = 0_u32;
@@ -313,46 +322,57 @@ fn get_star_from_blob(blob: &Blob, image: &GrayImage,
         y_min = cmp::min(y_min, candidate.y as u32);
         y_max = cmp::max(y_max, candidate.y as u32);
     }
-    let core_x_min = x_min;
-    let core_x_max = x_max;
-    let core_y_min = y_min;
-    let core_y_max = y_max;
-    let core_width: u32 = core_x_max - core_x_min + 1;
-    let core_height: u32 = core_y_max - core_y_min + 1;
+    let core_x_min = x_min as i32;
+    let core_x_max = x_max as i32;
+    let core_y_min = y_min as i32;
+    let core_y_max = y_max as i32;
+    let core_width = (core_x_max - core_x_min) as u32 + 1;
+    let core_height = (core_y_max - core_y_min) as u32 + 1;
+
+    let core = RegionOfInterest{
+        x: core_x_min as u32, y: core_y_min as u32,
+        width: core_width, height: core_height};
     // Reject blob if it is too big.
     if core_width > max_width || core_height > max_height {
-        debug!("Blob too large at WxH {}x{}", core_width, core_height);
+        debug!("Blob {:?} too large", core);
         return None;
     }
-    // Expand core bounding box by a three pixel border in all directions.
-    x_min -= 3;
-    x_max += 3;
-    y_min -= 3;
-    y_max += 3;
-    debug!("blob x range: {}-{}", x_min, x_max);
-    debug!("blob y range: {}-{}", y_min, y_max);
+    // Reject blob if its expansion goes past an image boundary.
+    if core_x_min - 3 < 0 || core_x_max + 3 >= image_width as i32 ||
+        core_y_min - 3 < 0 || core_y_max + 3 >= image_height as i32
+    {
+        debug!("Blob {:?} too close to edge", core);
+        return None;
+    }
+
+    // Expand core bounding box by three pixels in all directions.
+    let neighbors = RegionOfInterest{
+        x: core_x_min as u32 - 1, y: core_y_min as u32 - 1,
+        width: core_width + 2, height: core_height + 2};
+    let margin = RegionOfInterest{
+        x: core_x_min as u32 - 2, y: core_y_min as u32 - 2,
+        width: core_width + 4, height: core_height + 4};
+    let perimeter = RegionOfInterest{
+        x: core_x_min as u32 - 3, y: core_y_min as u32 - 3,
+        width: core_width + 6, height: core_height + 6};
 
     // Compute average of pixels in core.
     let mut core_sum: i32 = 0;
     let mut core_count: i32 = 0;
-    for (pixel_value, _x, _y) in RegionOfInterest::new(
-        image, core_x_min, core_x_max, core_y_min, core_y_max,
-        /*include_interior=*/true) {
+    for (_x, _y, pixel_value) in EnumeratePixels::new(
+        image, core, /*include_interior=*/true) {
         core_sum += pixel_value as i32;
         core_count += 1;
     }
     let core_mean = core_sum as f64 / core_count as f64;
 
-    // Compute average of pixels in box immediately surrounding core,
-    // excluding corner pixels.
+    // Compute average of pixels in box immediately surrounding core.
     let mut neighbor_sum: i32 = 0;
     let mut neighbor_count: i32 = 0;
-    for (pixel_value, x, y) in RegionOfInterest::new(
-        image, core_x_min - 1, core_x_max + 1, core_y_min - 1, core_y_max + 1,
-        /*include_interior=*/false) {
-        if (x == core_x_min - 1 || x == core_x_max + 1) &&
-            (y == core_y_min - 1 || y == core_y_max + 1) {
-            continue;
+    for (x, y, pixel_value) in EnumeratePixels::new(
+        image, neighbors, /*include_interior=*/false) {
+        if neighbors.is_corner(x, y) {
+            continue;  // Exclude corner pixels.
         }
         neighbor_sum += pixel_value as i32;
         neighbor_count += 1;
@@ -360,8 +380,8 @@ fn get_star_from_blob(blob: &Blob, image: &GrayImage,
     let neighbor_mean = neighbor_sum as f64 / neighbor_count as f64;
     // Core average must be at least as bright as the neighbor average.
     if core_mean < neighbor_mean {
-        debug!("Core average {} is less than neighbor average {}",
-               core_mean, neighbor_mean);
+        debug!("Core average {} is less than neighbor average {} for blob {:?}",
+               core_mean, neighbor_mean, core);
         return None;
     }
 
@@ -369,17 +389,16 @@ fn get_star_from_blob(blob: &Blob, image: &GrayImage,
     // inward from the outer perimeter.
     let mut margin_sum: i32 = 0;
     let mut margin_count: i32 = 0;
-    for (pixel_value, _x, _y) in RegionOfInterest::new(
-        image, core_x_min - 2, core_x_max + 2, core_y_min - 2, core_y_max + 2,
-        /*include_interior=*/false) {
+    for (_x, _y, pixel_value) in EnumeratePixels::new(
+        image, margin, /*include_interior=*/false) {
         margin_sum += pixel_value as i32;
         margin_count += 1;
     }
     let margin_mean = margin_sum as f64 / margin_count as f64;
     // Core average must be strictly brighter than the margin average.
     if core_mean <= margin_mean {
-        debug!("Core average {} is not greater than margin average {}",
-               core_mean, margin_mean);
+        debug!("Core average {} is not greater than margin average {} for blob {:?}",
+               core_mean, margin_mean, core);
         return None;
     }
 
@@ -389,34 +408,34 @@ fn get_star_from_blob(blob: &Blob, image: &GrayImage,
     let mut perimeter_count: i32 = 0;
     let mut perimeter_min = u8::MAX;
     let mut perimeter_max = 0_u8;
-    for (pixel_value, _x, _y) in RegionOfInterest::new(
-        image, x_min, x_max, y_min, y_max, /*include_interior=*/false) {
+    for (_x, _y, pixel_value) in EnumeratePixels::new(
+        image, perimeter, /*include_interior=*/false) {
         perimeter_sum += pixel_value as i32;
         perimeter_count += 1;
         perimeter_min = cmp::min(perimeter_min, pixel_value);
         perimeter_max = cmp::max(perimeter_max, pixel_value);
     }
     let background_est = perimeter_sum as f64 / perimeter_count as f64;
-    debug!("background: {} ", background_est);
+    debug!("background: {} for blob {:?}", background_est, core);
 
     // We require the perimeter pixels to be ~uniformly dark. See if any
     // perimeter pixel is too bright compared to the darkest perimeter
     // pixel.
     if perimeter_max as f64 - perimeter_min as f64 >
         sigma as f64 * noise_estimate as f64 {
-        debug!("Perimeter too varied");
+        debug!("Perimeter too varied for blob {:?}", core);
         return None;
     }
 
     // Verify that core average exceeds background by sigma * noise.
     if core_mean - background_est < sigma as f64 * noise_estimate as f64 {
-        debug!("Core too weak");
+        debug!("Core too weak for blob {:?}", core);
         return None;
     }
     // Verify that the neighbor average exceeds background by
     // 0.25 * sigma * noise.
     if neighbor_mean - background_est < 0.25 * sigma as f64 * noise_estimate as f64 {
-        debug!("Neighbors too weak");
+        debug!("Neighbors too weak for blob {:?}", core);
         return None;
     }
 
@@ -428,10 +447,8 @@ fn get_star_from_blob(blob: &Blob, image: &GrayImage,
     let mut m0: f64 = 0.0;
     let mut m1x: f64 = 0.0;
     let mut m1y: f64 = 0.0;
-    for (pixel_value, x, y) in RegionOfInterest::new(
-        image, core_x_min - 1, core_x_max + 1,
-        core_y_min - 1, core_y_max + 1,
-        /*include_interior=*/true) {
+    for (x, y, pixel_value) in EnumeratePixels::new(
+        image, neighbors, /*include_interior=*/true) {
         if pixel_value == 255 {
             num_saturated += 1;
         }
@@ -446,19 +463,14 @@ fn get_star_from_blob(blob: &Blob, image: &GrayImage,
     // Compute second moment about the centroid.
     let mut m2x_c: f64 = 0.0;
     let mut m2y_c: f64 = 0.0;
-    for (pixel_value, x, y) in RegionOfInterest::new(
-        image, core_x_min - 1, core_x_max + 1,
-        core_y_min - 1, core_y_max + 1,
-        /*include_interior=*/true) {
+    for (x, y, pixel_value) in EnumeratePixels::new(
+        image, neighbors, /*include_interior=*/true) {
         let val_minus_bkg = pixel_value as f64 - background_est;
         m2x_c += (x as f64 - centroid_x) * (x as f64 - centroid_x) * val_minus_bkg;
         m2y_c += (y as f64 - centroid_y) * (y as f64 - centroid_y) * val_minus_bkg;
     }
     let variance_x = m2x_c / m0;
     let variance_y = m2y_c / m0;
-    debug!("centroid x,y {},{}; variance x,y {},{}",
-           centroid_x, centroid_y, variance_x, variance_y);
-
     Some(StarDescription{centroid_x: (centroid_x + 0.5) as f32,
                          centroid_y: (centroid_y + 0.5) as f32,
                          stddev_x: variance_x.sqrt() as f32,
@@ -467,8 +479,9 @@ fn get_star_from_blob(blob: &Blob, image: &GrayImage,
                          num_saturated})
 }
 
-pub fn get_centroids_from_image(image: &GrayImage, sigma: f32)
-                                -> Vec<StarDescription> {
+pub fn get_stars_from_image(image: &GrayImage, sigma: f32,
+                            return_candidates: bool)
+                            -> Vec<StarDescription> {
     let (width, height) = image.dimensions();
     info!("Image width x height: {}x{}", width, height);
 
@@ -478,10 +491,22 @@ pub fn get_centroids_from_image(image: &GrayImage, sigma: f32)
         noise_estimate = 1.0;
     }
     let candidates = scan_rows_for_candidates(image, noise_estimate, sigma);
-    let blobs = form_blobs_from_candidates(candidates, height as i32);
-
-    let get_stars_start = Instant::now();
     let mut stars: Vec<StarDescription> = Vec::new();
+    if return_candidates {
+        for candidate in candidates {
+            stars.push(StarDescription{
+                centroid_x: candidate.x as f32,
+                centroid_y: candidate.y as f32,
+                stddev_x: 0_f32,
+                stddev_y: 0_f32,
+                sum: 0_f32,
+                num_saturated: 0});
+        }
+        return stars;
+    }
+
+    let blobs = form_blobs_from_candidates(candidates, height as i32);
+    let get_stars_start = Instant::now();
     for blob in blobs {
         match get_star_from_blob(&blob, image, noise_estimate, sigma, 5, 5) {
             Some(x) => stars.push(x),
