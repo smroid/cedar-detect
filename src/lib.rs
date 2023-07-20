@@ -32,7 +32,7 @@ struct EnumeratePixels<'a> {
 }
 
 impl<'a> EnumeratePixels<'a> {
-    fn new(image: &/*'a*/ GrayImage, roi: RegionOfInterest, include_interior: bool)
+    fn new(image: &GrayImage, roi: RegionOfInterest, include_interior: bool)
            -> EnumeratePixels {
         let (width, height) = image.dimensions();
         assert!(roi.x + roi.width < width);
@@ -117,7 +117,8 @@ struct CandidateFromRowScan {
     y: i32,
 }
 
-// Returns pixel value to histogram. Care is taken to not return a hot pixel.
+// Returns pixel value to histogram. The value is not background subtracted;
+// care is taken to not return a hot pixel.
 fn check_window_for_candidate(window: &[u8], center_x: u32, rownum: u32,
                               noise_estimate: f32, sigma: f32,
                               candidates: &mut Vec<CandidateFromRowScan>)
@@ -135,8 +136,7 @@ fn check_window_for_candidate(window: &[u8], center_x: u32, rownum: u32,
     if l > c || c < r {
         return c8;
     }
-    // Center pixel must be strictly brighter than its second left/right
-    // neighbors.
+    // Center pixel must be strictly brighter than its left/right margin.
     if lm >= c || c <= rm {
         return c8;
     }
@@ -165,7 +165,8 @@ fn check_window_for_candidate(window: &[u8], center_x: u32, rownum: u32,
     if sum_neighbors_over_background <
         (0.5 * sigma * noise_estimate as f32) as i16
     {
-        // We infer that 'c' is a hot pixel.
+        // We infer that 'c' is a hot pixel. For histogramming purposes,
+        // replace the hot pixel with its neighbors' value.
         return ((l + r) / 2) as u8;
     }
     // Center pixel must be sigma * estimated noise brighter than
@@ -196,9 +197,7 @@ fn scan_rows_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32,
     let row_scan_start = Instant::now();
     let (width, height) = image.dimensions();
     let image_pixels: &Vec<u8> = image.as_raw();
-    let mut candidates: Vec<CandidateFromRowScan> = Vec::new();
-
-    // TODO: shard the rows to multiple threads.
+    let mut candidates = Vec::<CandidateFromRowScan>::new();
     for rownum in 0..height {
         // Get the slice of image_pixels corresponding to this row.
         let row_pixels: &[u8] = &image_pixels.as_slice()
@@ -219,7 +218,6 @@ fn scan_rows_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32,
             }
         }
     }
-
     info!("Row scan found {} candidates in {:?}",
           candidates.len(), row_scan_start.elapsed());
     candidates
@@ -243,7 +241,7 @@ struct LabeledCandidate {
 fn form_blobs_from_candidates(candidates: Vec<CandidateFromRowScan>, height: i32)
                               -> Vec<Blob> {
     let blobs_start = Instant::now();
-    let mut labeled_candidates_by_row: Vec<Vec<LabeledCandidate>> = Vec::new();
+    let mut labeled_candidates_by_row = Vec::<Vec<LabeledCandidate>>::new();
     labeled_candidates_by_row.resize(height as usize, Vec::<LabeledCandidate>::new());
 
     let mut blobs: HashMap<i32, Blob> = HashMap::new();
@@ -514,14 +512,16 @@ pub fn get_stars_from_image(image: &GrayImage, sigma: f32,
     }
     // While looking for star candidates, grab a histogram of the middle third
     // (in each dimension) of the image.
+    // TODO: make this square, using 1/3 of the shorter dimension.
     let histogram_roi = RegionOfInterest{x: width / 3, y: height / 3,
                                          width: width / 3, height: height / 3};
     let mut histogram: [u32; 256] = [0; 256];
     let candidates = scan_rows_for_candidates(image, noise_estimate, sigma,
                                               histogram_roi, &mut histogram);
     debug!("Central region histogram from scan: {:?}", histogram);
-    let mut stars: Vec<StarDescription> = Vec::new();
+    let mut stars = Vec::<StarDescription>::new();
     if return_candidates {
+        // Debugging feature.
         for candidate in candidates {
             stars.push(StarDescription{
                 centroid_x: candidate.x as f32,
@@ -533,7 +533,6 @@ pub fn get_stars_from_image(image: &GrayImage, sigma: f32,
         }
         return stars;
     }
-
     let blobs = form_blobs_from_candidates(candidates, height as i32);
     let get_stars_start = Instant::now();
     for blob in blobs {
