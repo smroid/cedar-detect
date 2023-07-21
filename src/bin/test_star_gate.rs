@@ -20,7 +20,7 @@ fn main() {
     let sigma = 6.0;
     let return_candidates = false;
     let mut stars = get_stars_from_image(&img_u8, sigma, return_candidates);
-    stars.sort_by(|a, b| b.sum.partial_cmp(&a.sum).unwrap());
+    stars.sort_by(|a, b| b.mean_brightness.partial_cmp(&a.mean_brightness).unwrap());
 
     // Scribble marks into the image showing where we found stars.
     for star in stars {
