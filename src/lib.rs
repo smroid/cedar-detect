@@ -131,33 +131,29 @@ fn estimate_noise_from_image(image: &GrayImage) -> f32 {
     // Pick the darkest box.
     stats_vec.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
     let stddev = stats_vec[0].1;
-    info!("Noise estimate {} found in {:?}", stddev, noise_start.elapsed());
+    debug!("Noise estimate {} found in {:?}", stddev, noise_start.elapsed());
     stddev
 }
 
-#[derive(Copy, Clone, Debug)]
-struct CandidateFromRowScan {
-    x: i32,
-    y: i32,
-}
-
 // TODO: doc
-// Returns pixel value to use for possible ROI processing. The value is not
-// background subtracted, but care is taken to not return a hot pixel.
 // Disucssion:
 // TODO. hot performance path
-fn screen_candidate(window: &[u8], center_x: u32, rownum: u32,
-                    noise_estimate: f32, sigma: f32,
-                    candidates: &mut Vec<CandidateFromRowScan>,
-                    is_hot_pixel: &mut bool) -> u8{
-    let lb = window[0] as i16;  // Left border.
-    let lm = window[1] as i16;  // Left margin.
-    let l = window[2] as i16;   // Left neighbor.
-    let c = window[3] as i16;   // Center.
-    let r = window[4] as i16;   // Right neighbor.
-    let rm = window[5] as i16;  // Right margin.
-    let rb = window[6] as i16;  // Right border.
-    let c8 = window[3];
+// Returns:
+//   0: pixel value to use for possible ROI processing. The value is not
+//      background subtracted, but care is taken to not return a hot pixel.
+//   1: whether the gate's center pixel satisfies all of the 1d criteria
+//      to be further evaluated as a star.
+//   2: whether the gate's center pixel is a hot pixel.
+fn gate_star_1d(gate: &[u8], noise_estimate: f32, sigma: f32)
+                -> (u8, bool, bool) {
+    let lb = gate[0] as i16;  // Left border.
+    let lm = gate[1] as i16;  // Left margin.
+    let l = gate[2] as i16;   // Left neighbor.
+    let c = gate[3] as i16;   // Center.
+    let r = gate[4] as i16;   // Right neighbor.
+    let rm = gate[5] as i16;  // Right margin.
+    let rb = gate[6] as i16;  // Right border.
+    let c8 = gate[3];
 
     // Center pixel must be sigma * estimated noise brighter than the
     // estimated background. Do this test first, because it eliminates
@@ -166,34 +162,34 @@ fn screen_candidate(window: &[u8], center_x: u32, rownum: u32,
     let est_background_2 = lb + rb;
     let center_over_background_2 = c + c - est_background_2;
     if center_over_background_2 < (sigma_noise * 2_f32) as i16 {
-        return c8;
+        return (c8, false, false);
     }
 
     // Center pixel must be at least as bright as its immediate left/right
     // neighbors.
     if l > c || c < r {
-        return c8;
+        return (c8, false, false);
     }
     // Center pixel must be strictly brighter than its left/right margin.
     if lm >= c || c <= rm {
-        return c8;
+        return (c8, false, false);
     }
     // Center pixel must be strictly brighter than the borders.
     if lb >= c || c <= rb {
-        return c8;
+        return (c8, false, false);
     }
     if l == c {
         // Break tie between left and center.
         if lm > r {
             // Left will have been the center of its own candidate entry.
-            return c8;
+            return (c8, false, false);
         }
     }
     if c == r {
         // Break tie between center and right.
         if l <= rm {
             // Right will be the center of its own candidate entry.
-            return c8;
+            return (c8, false, false);
         }
     }
     // Average of l+r must be 0.25 * sigma * estimated noise brighter
@@ -202,130 +198,72 @@ fn screen_candidate(window: &[u8], center_x: u32, rownum: u32,
     let sum_neighbors_over_background = l + r - est_background_2;
     if sum_neighbors_over_background < (0.5 * sigma_noise) as i16
     {
-        *is_hot_pixel = true;
         // For ROI processing purposes, replace the hot pixel with its
         // neighbors' value.
-        return ((l + r) / 2) as u8;
+        return (((l + r) / 2) as u8, false, /*hot_pixel=*/true);
     }
     // We require the border pixels to be ~uniformly dark. See if there
     // is too much brightness difference between the border pixels.
     // Discussion: TODO.
     let border_diff = (lb - rb).abs();
     if border_diff > (0.5 * sigma_noise) as i16 {
-        return c8;
+        return (c8, false, false);
     }
-
     // We have a candidate star from our 1d analysis!
-    candidates.push(CandidateFromRowScan{x: center_x as i32, y: rownum as i32});
-    debug!("Candidate at row {} col {}; window {:?}", rownum, center_x, window);
-    return c8;
+    return (c8, /*is_star_candidate=*/true, false);
 }
 
-// The information here is from original pixel data (not background subtracted)
-// but with hot pixels replaced with interpolated neighbor values.
-#[derive(Debug)]
-#[allow(dead_code)]
-struct RegionOfInterestSummary {
-    // Histogram of pixel values in the ROI.
-    histogram: [u32; 256],
-
-    // Each element is the mean of a row of the ROI. Size is thus the ROI height.
-    horizontal_projection: Vec<f32>,
-
-    // Each element is the mean of a column of the ROI. Size is thus the ROI
-    // width.
-    vertical_projection: Vec<f32>,
+#[derive(Copy, Clone, Debug)]
+struct CandidateFromRowGate {
+    x: i32,
+    y: i32,
 }
 
 // The candidates are returned in raster scan order.
-// `roi` If provided, additional information is gathered for the region of
-//     interest. The pixel data feeding this information is not background
-//     subtracted, but hot pixels are replaced with interpolated neighbor
-//     values.
 // Returns:
-// Vec<CandidateFromRowScan>: the identifed star candidates
+// Vec<CandidateFromRowGate>: the identifed star candidates
 // u32: count of hot pixels detected
-// Option<RegionOfInterestSummary>: if requested, the region of interest
-//     summary information.
 // Discussion:
 // TODO.
-fn scan_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32,
-                       roi: Option<RegionOfInterest>)
-                       -> (Vec<CandidateFromRowScan>, u32,
-                           Option<RegionOfInterestSummary>)
+fn scan_image_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
+                       -> (Vec<CandidateFromRowGate>, u32)
 {
-    let mut hot_pixel_count = 0_u32;
-    let mut histogram: [u32; 256] = [0_u32; 256];
-    let mut horizontal_projection_sum = Vec::<u32>::new();
-    let mut vertical_projection_sum = Vec::<u32>::new();
-    let mut got_roi = RegionOfInterest{x: 0, y: 0, width: 0, height: 0};
-    let mut do_roi = false;
-    match roi {
-        Some(roi) => {
-            got_roi = roi;
-            horizontal_projection_sum.resize(roi.height as usize, 0_u32);
-            vertical_projection_sum.resize(roi.width as usize, 0_u32);
-        }
-        None => ()
-    }
     let row_scan_start = Instant::now();
+    let mut hot_pixel_count = 0_u32;
     let (width, height) = image.dimensions();
     let image_pixels: &Vec<u8> = image.as_raw();
-    let mut candidates = Vec::<CandidateFromRowScan>::new();
+    let mut candidates = Vec::<CandidateFromRowGate>::new();
+    // We'll generally have way fewer than 1 candidate per row.
+    candidates.reserve(height as usize);
     for rownum in 0..height {
-        match roi {
-            Some(roi) => {
-                do_roi = rownum >= roi.y && rownum < roi.y + roi.height;
-            }
-            None => ()
-        }
         // Get the slice of image_pixels corresponding to this row.
         let row_pixels: &[u8] = &image_pixels.as_slice()
             [(rownum * width) as usize .. ((rownum+1) * width) as usize];
-        // Slide a 7 pixel window across the row.
+        // Slide a 7 pixel gate across the row.
         let mut center_x = 2_u32;
-        for window in row_pixels.windows(7) {
+        for gate in row_pixels.windows(7) {
             center_x += 1;
-            let mut is_hot_pixel = false;
-            let pixel_value = screen_candidate(
-                window, center_x, rownum, noise_estimate, sigma,
-                &mut candidates, &mut is_hot_pixel);
+            let (_pixel_value, is_star_candidate, is_hot_pixel) =
+                gate_star_1d(gate, noise_estimate, sigma);
+            if is_star_candidate {
+                debug!("Candidate at row {} col {}; gate {:?}",
+                       rownum, center_x, gate);
+                candidates.push(CandidateFromRowGate{x: center_x as i32,
+                                                     y: rownum as i32});
+            }
             if is_hot_pixel {
                 hot_pixel_count += 1;
             }
-            if do_roi && center_x >= got_roi.x &&
-                center_x < got_roi.x + got_roi.width
-            {
-                histogram[pixel_value as usize] += 1;
-                horizontal_projection_sum[(rownum - got_roi.y) as usize]
-                    += pixel_value as u32;
-                vertical_projection_sum[(center_x - got_roi.x) as usize]
-                    += pixel_value as u32;
-            }
         }
     }
-    info!("Row scan found {} candidates in {:?}",
-          candidates.len(), row_scan_start.elapsed());
-    (candidates,
-     hot_pixel_count,
-     match roi {
-        Some(roi) => {
-            let h_proj: Vec<f32> = horizontal_projection_sum.into_iter().map(
-                |x| x as f32 / roi.width as f32).collect();
-            let v_proj: Vec<f32> = vertical_projection_sum.into_iter().map(
-                |x| x as f32 / roi.height as f32).collect();
-            Some(RegionOfInterestSummary{histogram,
-                                         horizontal_projection: h_proj,
-                                         vertical_projection: v_proj,
-            })
-        }
-        None => None
-    })
+    info!("Image scan found {} candidates and {} hot pixels in {:?}",
+          candidates.len(), hot_pixel_count, row_scan_start.elapsed());
+    (candidates, hot_pixel_count)
 }
 
 #[derive(Debug)]
 struct Blob {
-    candidates: Vec<CandidateFromRowScan>,
+    candidates: Vec<CandidateFromRowGate>,
 
     // If candidates is empty, that means this blob has been merged into
     // another blob.
@@ -334,12 +272,12 @@ struct Blob {
 
 #[derive(Copy, Clone)]
 struct LabeledCandidate {
-    candidate: CandidateFromRowScan,
+    candidate: CandidateFromRowGate,
     blob_id: i32,
 }
 
 // Discussion: TODO.
-fn form_blobs_from_candidates(candidates: Vec<CandidateFromRowScan>, height: i32)
+fn form_blobs_from_candidates(candidates: Vec<CandidateFromRowGate>, height: i32)
                               -> Vec<Blob> {
     let blobs_start = Instant::now();
     let mut labeled_candidates_by_row = Vec::<Vec<LabeledCandidate>>::new();
@@ -377,7 +315,7 @@ fn form_blobs_from_candidates(candidates: Vec<CandidateFromRowScan>, height: i32
                 // row blob's candidates.
                 let recipient_blob_id = rc.blob_id;
                 let mut donor_blob_id = prev_row_rc.blob_id;
-                let mut donated_candidates: Vec<CandidateFromRowScan>;
+                let mut donated_candidates: Vec<CandidateFromRowGate>;
                 loop {
                     let donor_blob = blobs.get_mut(&donor_blob_id).unwrap();
                     if !donor_blob.candidates.is_empty() {
@@ -429,9 +367,9 @@ pub struct StarDescription {
 }
 
 // TODO: doc.
-fn get_star_from_blob(blob: &Blob, image: &GrayImage,
-                      noise_estimate: f32, sigma: f32,
-                      max_width: u32, max_height: u32) -> Option<StarDescription> {
+fn gate_star_2d(blob: &Blob, image: &GrayImage,
+                noise_estimate: f32, sigma: f32,
+                max_width: u32, max_height: u32) -> Option<StarDescription> {
     let (image_width, image_height) = image.dimensions();
     // Compute the bounding box of all of the blob's center coords.
     let mut x_min = u32::MAX;
@@ -560,7 +498,7 @@ fn get_star_from_blob(blob: &Blob, image: &GrayImage,
         return None;
     }
 
-    // Star passes all of the gates!
+    // Star passes all of the 2d gates!
 
     // Process the interior pixels (core plus immediate neighbors) to
     // obtain moments. Also note the count of saturated pixels.
@@ -603,35 +541,18 @@ fn get_star_from_blob(blob: &Blob, image: &GrayImage,
 
 // TODO: ROI
 // TODO: exhaustive_2d.
-// TODO: return roi summary, hot pixel count.
+// TODO: return roi summary, hot pixel count, noise estimate
 // TODO: doc.
 pub fn get_stars_from_image(image: &GrayImage, sigma: f32,
                             return_candidates: bool)
-                            -> Vec<StarDescription> {
-    let (width, height) = image.dimensions();
-    info!("Image width x height: {}x{}", width, height);
-
+                            -> (Vec<StarDescription>, u32) {
     let mut noise_estimate = estimate_noise_from_image(image);
     if noise_estimate < 1.0 {
         // Likely the image background is crushed to black.
         noise_estimate = 1.0;
     }
-    // While looking for star candidates, compute extra information for a
-    // moderate-sized square ROI in the center of the image.
-    // Discussion: TODO (center is likely to avoid bright interference during
-    // initial focus and centering interactions).
-    let roi_size = cmp::min(width, height) / 3;
-    let roi = RegionOfInterest{x: (width - roi_size) / 2,
-                               y: (height - roi_size) / 2,
-                               width: roi_size, height: roi_size};
-    let (candidates, hot_pixel_count, roi_summary) =
-        scan_for_candidates(image, noise_estimate, sigma, Some(roi));
-    match roi_summary {
-        Some(roi_summary) => {
-            debug!("ROI summary from scan: {:?}", roi_summary);
-        }
-        None => ()
-    }
+    let (candidates, hot_pixel_count) =
+        scan_image_for_candidates(image, noise_estimate, sigma);
     let mut stars = Vec::<StarDescription>::new();
     if return_candidates {
         // Debugging feature.
@@ -644,17 +565,97 @@ pub fn get_stars_from_image(image: &GrayImage, sigma: f32,
                 mean_brightness: 0_f32,
                 num_saturated: 0});
         }
-        return stars;
+        return (stars, hot_pixel_count);
     }
-    let blobs = form_blobs_from_candidates(candidates, height as i32);
+    let blobs = form_blobs_from_candidates(candidates, image.height() as i32);
     let get_stars_start = Instant::now();
     for blob in blobs {
-        match get_star_from_blob(&blob, image, noise_estimate, sigma, 5, 5) {
+        match gate_star_2d(&blob, image, noise_estimate, sigma, 5, 5) {
             Some(x) => stars.push(x),
             None => ()
         }
     }
-    info!("Blob processing found {} stars and {} hot pixels in {:?}",
-          stars.len(), hot_pixel_count, get_stars_start.elapsed());
-    stars
+    debug!("2d star gating found {} stars in {:?}",
+          stars.len(), get_stars_start.elapsed());
+    (stars, hot_pixel_count)
+}
+
+// The information here is from original pixel data (not background subtracted)
+// but with hot pixels replaced with interpolated neighbor values.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct RegionOfInterestSummary {
+    // Histogram of pixel values in the ROI.
+    pub histogram: [u32; 256],
+
+    // Each element is the mean of a row of the ROI. Size is thus the ROI height.
+    pub horizontal_projection: Vec<f32>,
+
+    // Each element is the mean of a column of the ROI. Size is thus the ROI
+    // width.
+    pub vertical_projection: Vec<f32>,
+}
+
+    // let roi_size = cmp::min(width, height) / 3;
+    // let roi = RegionOfInterest{x: (width - roi_size) / 2,
+    //                            y: (height - roi_size) / 2,
+    //                            width: roi_size, height: roi_size};
+    // While looking for star candidates, compute extra information for a
+    // moderate-sized square ROI in the center of the image.
+    // Discussion: TODO (center is likely to avoid bright interference during
+    // initial focus and centering interactions).
+// Gathers information the region of interest. The pixel data feeding this
+// information is not background subtracted, but hot pixels are replaced with
+// interpolated neighbor values.
+pub fn summarize_region_of_interest(image: &GrayImage, roi: &RegionOfInterest,
+                                    noise_estimate: f32, sigma: f32)
+                                    -> RegionOfInterestSummary {
+    let process_roi_start = Instant::now();
+
+    let (width, height) = image.dimensions();
+    assert!(roi.y + roi.height < height);
+    // Sliding gate needs to extend past left and right edges of ROI. Make sure
+    // there's enough image.
+    let gate_leftmost: i32 = roi.x as i32 - 3;
+    let gate_rightmost = roi.x + roi.width + 3;  // One past.
+    assert!(gate_leftmost >= 0);
+    assert!(gate_rightmost <= width);
+    let image_pixels: &Vec<u8> = image.as_raw();
+
+    let mut histogram: [u32; 256] = [0_u32; 256];
+    let mut horizontal_projection_sum = Vec::<u32>::new();
+    let mut vertical_projection_sum = Vec::<u32>::new();
+    horizontal_projection_sum.resize(roi.height as usize, 0_u32);
+    vertical_projection_sum.resize(roi.width as usize, 0_u32);
+
+    for rownum in roi.y..roi.y + roi.height {
+        // Get the slice of image_pixels corresponding to this row of the ROI.
+        let row_start = (rownum * width) as usize;
+        let row_pixels: &[u8] = &image_pixels.as_slice()
+            [row_start + gate_leftmost as usize ..
+             row_start + gate_rightmost as usize];
+        // Slide a 7 pixel gate across the row.
+        let mut center_x = 2_u32;
+        for gate in row_pixels.windows(7) {
+            center_x += 1;
+            let (pixel_value, _is_star_candidate, _is_hot_pixel) =
+                gate_star_1d(gate, noise_estimate, sigma);
+            histogram[pixel_value as usize] += 1;
+            horizontal_projection_sum[(rownum - roi.y) as usize]
+                += pixel_value as u32;
+            vertical_projection_sum[(center_x - roi.x) as usize]
+                += pixel_value as u32;
+
+        }
+    }
+    let h_proj: Vec<f32> = horizontal_projection_sum.into_iter().map(
+        |x| x as f32 / roi.width as f32).collect();
+    let v_proj: Vec<f32> = vertical_projection_sum.into_iter().map(
+        |x| x as f32 / roi.height as f32).collect();
+
+    debug!("ROI processing completed in {:?}", process_roi_start.elapsed());
+    RegionOfInterestSummary{histogram,
+                            horizontal_projection: h_proj,
+                            vertical_projection: v_proj,
+    }
 }

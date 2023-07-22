@@ -1,8 +1,10 @@
 use std::env;
+use std::time::Instant;
 
 use env_logger;
 use image::io::Reader as ImageReader;
 use image::Luma;
+use log::{info};
 
 use star_gate::get_stars_from_image;
 
@@ -16,11 +18,16 @@ fn main() {
     let img = ImageReader::open(image_file).unwrap().decode().unwrap();
     let mut img_u8 = img.into_luma8();
     let (width, height) = img_u8.dimensions();
+    info!("Image width x height: {}x{}", width, height);
 
-    let sigma = 6.0;
+    let star_extraction_start = Instant::now();
     let return_candidates = false;
-    let mut stars = get_stars_from_image(&img_u8, sigma, return_candidates);
-    stars.sort_by(|a, b| b.mean_brightness.partial_cmp(&a.mean_brightness).unwrap());
+    let (stars, _hot_pixel_count) =
+        get_stars_from_image(&img_u8, /*sigma=*/6.0, return_candidates);
+    let elapsed = star_extraction_start.elapsed();
+    info!("Star extraction found {} stars in {:?}", stars.len(), elapsed);
+    info!("{} megapixels per second",
+          (width * height) as f32 / elapsed.as_micros() as f32);
 
     // Scribble marks into the image showing where we found stars.
     for star in stars {
