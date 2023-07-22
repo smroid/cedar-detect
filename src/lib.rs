@@ -20,9 +20,12 @@ struct EnumeratePixels<'a> {
 }
 
 impl<'a> EnumeratePixels<'a> {
+    // If include_interior is false, only the perimeter is enumerated.
     fn new(image: &'a GrayImage, roi: &'a Rect, include_interior: bool)
            -> EnumeratePixels<'a> {
         let (width, height) = image.dimensions();
+        assert!(roi.left() >= 0);
+        assert!(roi.top() >= 0);
         assert!(roi.right() < width as i32);
         assert!(roi.bottom() < height as i32);
         EnumeratePixels{image, roi, include_interior,
@@ -94,7 +97,7 @@ fn stats_for_roi(image: &GrayImage, roi: &Rect) -> (f32, f32) {
 // is processed as follows:
 // 1. The 5% brightest pixels are excluded.
 // 2. The mean of the N remaining pixels is computed, and the standard
-//    deviation is computed in the usuakl way as
+//    deviation is computed in the usual way as
 //      sqrt(sum((pixel-mean)*(pixel-mean))/N)
 //
 // To guard against accidentally sampling a bright part of the image (moon?
@@ -535,13 +538,13 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
 pub fn get_stars_from_image(image: &GrayImage, sigma: f32,
                             return_candidates: bool)
                             -> (Vec<StarDescription>, u32, f32) {
-    let mut noise_estimate = estimate_noise_from_image(image);
-    if noise_estimate < 1.0 {
-        // Likely the image background is crushed to black.
-        noise_estimate = 1.0;
-    }
+    let noise_estimate = estimate_noise_from_image(image);
+    // If noise estimate is below 1.0, assume that the image background has been
+    // crushed to black and use a minimum noise value.
+    let corrected_noise_estimate = f32::max(noise_estimate, 1.0);
+
     let (candidates, hot_pixel_count) =
-        scan_image_for_candidates(image, noise_estimate, sigma);
+        scan_image_for_candidates(image, corrected_noise_estimate, sigma);
     let mut stars = Vec::<StarDescription>::new();
     if return_candidates {
         // Debugging feature.
@@ -559,7 +562,7 @@ pub fn get_stars_from_image(image: &GrayImage, sigma: f32,
     let blobs = form_blobs_from_candidates(candidates, image.height() as i32);
     let get_stars_start = Instant::now();
     for blob in blobs {
-        match gate_star_2d(&blob, image, noise_estimate, sigma, 5, 5) {
+        match gate_star_2d(&blob, image, corrected_noise_estimate, sigma, 5, 5) {
             Some(x) => stars.push(x),
             None => ()
         }
@@ -647,13 +650,14 @@ mod tests {
     extern crate approx;
     use approx::assert_abs_diff_eq;
     use image::Luma;
+    use imageproc::gray_image;
     use imageproc::noise::gaussian_noise;
     use super::*;
 
     #[test]
     #[should_panic]
     fn test_enumerate_pixels_roi_too_large() {
-        let empty_image = GrayImage::new(0, 0);
+        let empty_image = gray_image!();
         let _iter = EnumeratePixels::new(
             &empty_image,
             &Rect::at(0, 0).of_size(1, 1),
@@ -662,9 +666,7 @@ mod tests {
 
     #[test]
     fn test_enumerate_pixels_1x1() {
-        let mut image_1x1 = GrayImage::new(1, 1);
-        let grey = Luma::<u8>([127]);
-        image_1x1.put_pixel(0, 0, grey);
+        let image_1x1 = gray_image!(127);
         let pixels: Vec<(i32, i32, u8)> =
             EnumeratePixels::new(&image_1x1,
                                  &Rect::at(0, 0).of_size(1, 1),
@@ -674,23 +676,10 @@ mod tests {
 
     #[test]
     fn test_enumerate_pixels_3x3() {
-        let mut image_3x3 = GrayImage::new(3, 3);
-        let p0 = Luma::<u8>([0]);
-        let p1 = Luma::<u8>([1]);
-        let p2 = Luma::<u8>([2]);
-        let p127 = Luma::<u8>([127]);
-        let p253 = Luma::<u8>([253]);
-        let p254 = Luma::<u8>([254]);
-        let p255 = Luma::<u8>([255]);
-        image_3x3.put_pixel(0, 0, p0);
-        image_3x3.put_pixel(1, 0, p1);
-        image_3x3.put_pixel(2, 0, p2);
-        image_3x3.put_pixel(0, 1, p127);
-        image_3x3.put_pixel(1, 1, p253);
-        image_3x3.put_pixel(2, 1, p254);
-        image_3x3.put_pixel(0, 2, p255);
-        image_3x3.put_pixel(1, 2, p0);
-        image_3x3.put_pixel(2, 2, p1);
+        let image_3x3 = gray_image!(
+            0, 1, 2;
+            127, 253, 254;
+            255, 0, 1);
 
         // Entire ROI, with interior.
         let mut pixels: Vec<(i32, i32, u8)> =

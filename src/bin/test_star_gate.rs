@@ -18,13 +18,13 @@ fn main() {
     let img = ImageReader::open(image_file).unwrap().decode().unwrap();
     let mut img_u8 = img.into_luma8();
     let (width, height) = img_u8.dimensions();
-    info!("Image width x height: {}x{}", width, height);
 
     let star_extraction_start = Instant::now();
     let return_candidates = false;
-    let (stars, _hot_pixel_count, _noise_estimate) =
+    let (stars, _hot_pixel_count, noise_estimate) =
         get_stars_from_image(&img_u8, /*sigma=*/6.0, return_candidates);
     let elapsed = star_extraction_start.elapsed();
+    info!("Image WxH: {}x{}; noise level {}", width, height, noise_estimate);
     info!("Star extraction found {} stars in {:?}", stars.len(), elapsed);
     info!("{}ms per megapixel",
           elapsed.as_secs_f32() * 1000.0 / ((width * height) as f32 / 1000000_f32));
