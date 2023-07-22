@@ -166,7 +166,7 @@ fn estimate_noise_from_image(image: &GrayImage) -> f32 {
 //      candidate or a hot pixel).
 //   2: whether the gate's center pixel is a hot pixel. If item 1 is true
 //      item 2 distinguishes whether it is hot pixel or star candidate.
-fn gate_star_1d(gate: &[u8], noise_estimate: f32, sigma: f32)
+fn gate_star_1d(gate: &[u8], sigma_noise_2: i16)
                 -> (/*corrected_value*/u8, /*interesting*/bool, /*hot_pixel*/bool) {
     let lb = gate[0] as i16;  // Left border.
     let lm = gate[1] as i16;  // Left margin.
@@ -177,13 +177,12 @@ fn gate_star_1d(gate: &[u8], noise_estimate: f32, sigma: f32)
     let rb = gate[6] as i16;  // Right border.
     let c8 = gate[3];
 
-    // Center pixel must be sigma * estimated noise brighter than the
-    // estimated background. Do this test first, because it eliminates
-    // the vast majority of pixels.
-    let sigma_noise: f32 = sigma * noise_estimate;
+    // Center pixel must be sigma * estimated noise brighter than the estimated
+    // background. Do this test first, because it eliminates the vast majority
+    // of candidates.
     let est_background_2 = lb + rb;
     let center_over_background_2 = c + c - est_background_2;
-    if center_over_background_2 < (sigma_noise * 2_f32) as i16 {
+    if center_over_background_2 < sigma_noise_2 {
         return (c8, false, false);
     }
 
@@ -218,8 +217,7 @@ fn gate_star_1d(gate: &[u8], noise_estimate: f32, sigma: f32)
     // than the estimated background.
     // Discussion: TODO.
     let sum_neighbors_over_background = l + r - est_background_2;
-    if sum_neighbors_over_background < (0.5 * sigma_noise) as i16
-    {
+    if sum_neighbors_over_background < sigma_noise_2 / 4 {
         // For ROI processing purposes, replace the hot pixel with its
         // neighbors' value.
         return (((l + r) / 2) as u8, /*interesting=*/true, /*hot_pixel=*/true);
@@ -228,7 +226,7 @@ fn gate_star_1d(gate: &[u8], noise_estimate: f32, sigma: f32)
     // is too much brightness difference between the border pixels.
     // Discussion: TODO.
     let border_diff = (lb - rb).abs();
-    if border_diff > (0.5 * sigma_noise) as i16 {
+    if border_diff > sigma_noise_2 / 4 {
         return (c8, false, false);
     }
     // We have a candidate star from our 1d analysis!
@@ -254,6 +252,7 @@ fn scan_image_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
     let (width, height) = image.dimensions();
     let image_pixels: &Vec<u8> = image.as_raw();
     let mut candidates = Vec::<CandidateFromRowGate>::new();
+    let sigma_noise_2 = (2.0 * sigma * noise_estimate) as i16;
     // We'll generally have way fewer than 1 candidate per row.
     candidates.reserve(height as usize);
     for rownum in 0..height {
@@ -265,7 +264,7 @@ fn scan_image_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
         for gate in row_pixels.windows(7) {
             center_x += 1;
             let (_pixel_value, is_interesting, is_hot_pixel) =
-                gate_star_1d(gate, noise_estimate, sigma);
+                gate_star_1d(gate, sigma_noise_2);
             if is_interesting {
                 if is_hot_pixel {
                     debug!("Hot pixel at row {} col {}; gate {:?}",
@@ -643,6 +642,7 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &RegionOfInterest,
     horizontal_projection_sum.resize(roi.height as usize, 0_u32);
     vertical_projection_sum.resize(roi.width as usize, 0_u32);
 
+    let sigma_noise_2 = (2.0 * sigma * noise_estimate) as i16;
     for rownum in roi.y..roi.y + roi.height {
         // Get the slice of image_pixels corresponding to this row of the ROI.
         let row_start = (rownum * width) as usize;
@@ -654,7 +654,7 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &RegionOfInterest,
         for gate in row_pixels.windows(7) {
             center_x += 1;
             let (pixel_value, _is_interesting, _is_hot_pixel) =
-                gate_star_1d(gate, noise_estimate, sigma);
+                gate_star_1d(gate, sigma_noise_2);
             histogram[pixel_value as usize] += 1;
             horizontal_projection_sum[(rownum - roi.y) as usize]
                 += pixel_value as u32;

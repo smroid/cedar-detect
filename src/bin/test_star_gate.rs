@@ -26,8 +26,8 @@ fn main() {
         get_stars_from_image(&img_u8, /*sigma=*/6.0, return_candidates);
     let elapsed = star_extraction_start.elapsed();
     info!("Star extraction found {} stars in {:?}", stars.len(), elapsed);
-    info!("{} megapixels per second",
-          (width * height) as f32 / elapsed.as_micros() as f32);
+    info!("{}ms per megapixel",
+          elapsed.as_secs_f32() * 1000.0 / ((width * height) as f32 / 1000000_f32));
 
     // Scribble marks into the image showing where we found stars.
     for star in stars {
