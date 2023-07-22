@@ -7,26 +7,46 @@ use log::{debug, info};
 
 #[derive(Copy, Clone, Debug)]
 pub struct RegionOfInterest {
+    // The upper left corner of the ROI.
     pub x: u32,
     pub y: u32,
+
+    // The size of the ROI. Can be empty (zero width and/or height).
     pub width: u32,
     pub height: u32,
 }
 
 impl RegionOfInterest {
+    #[allow(dead_code)]
+    fn contains(&self, x: u32, y: u32) -> bool {
+        if self.width == 0 || self.height == 0 {
+            false
+        } else {
+            x >= self.x && x < self.x + self.width &&
+                y >= self.y && y < self.y + self.height
+        }
+    }
+
+    // Empty ROI (zero width and/or height) has no corner.
     fn is_corner(&self, x: u32, y: u32) -> bool {
-        (x == self.x || x == self.x + self.width - 1) &&
-            (y == self.y || y == self.y + self.height - 1)
+        if self.width == 0 || self.height == 0 {
+            false
+        } else {
+            (x == self.x || x == self.x + self.width - 1) &&
+                (y == self.y || y == self.y + self.height - 1)
+        }
     }
 }
 
 // An iterator over the pixels of a region of interest. Yields pixels in raster
-// scan order. An empty ROI (zero width and/or height) yields no pixels.
+// scan order.
 struct EnumeratePixels<'a> {
     image: &'a GrayImage,
     roi: &'a RegionOfInterest,
     include_interior: bool,
 
+    // Identifies the next pixel to be yielded. If cur_y is
+    // beyond the ROI's y+height, the iteration is finished.
     cur_x: u32,
     cur_y: u32,
 }
@@ -35,8 +55,8 @@ impl<'a> EnumeratePixels<'a> {
     fn new(image: &'a GrayImage, roi: &'a RegionOfInterest, include_interior: bool)
            -> EnumeratePixels<'a> {
         let (width, height) = image.dimensions();
-        assert!(roi.x + roi.width < width);
-        assert!(roi.y + roi.height < height);
+        assert!(roi.x + roi.width <= width);
+        assert!(roi.y + roi.height <= height);
         EnumeratePixels{image, roi, include_interior, cur_x: roi.x, cur_y: roi.y}
     }
 }
@@ -139,13 +159,15 @@ fn estimate_noise_from_image(image: &GrayImage) -> f32 {
 // Disucssion:
 // TODO. hot performance path
 // Returns:
-//   0: pixel value to use for possible ROI processing. The value is not
-//      background subtracted, but care is taken to not return a hot pixel.
-//   1: whether the gate's center pixel satisfies all of the 1d criteria
-//      to be further evaluated as a star.
-//   2: whether the gate's center pixel is a hot pixel.
+//   0: corrected pixel value to use for possible ROI processing. The value is
+//      not background subtracted, but care is taken to substitute hot pixel
+//      value with its neighboring pixel value.
+//   1: whether the gate's center pixel is "interesting" (either a star
+//      candidate or a hot pixel).
+//   2: whether the gate's center pixel is a hot pixel. If item 1 is true
+//      item 2 distinguishes whether it is hot pixel or star candidate.
 fn gate_star_1d(gate: &[u8], noise_estimate: f32, sigma: f32)
-                -> (u8, bool, bool) {
+                -> (/*corrected_value*/u8, /*interesting*/bool, /*hot_pixel*/bool) {
     let lb = gate[0] as i16;  // Left border.
     let lm = gate[1] as i16;  // Left margin.
     let l = gate[2] as i16;   // Left neighbor.
@@ -200,7 +222,7 @@ fn gate_star_1d(gate: &[u8], noise_estimate: f32, sigma: f32)
     {
         // For ROI processing purposes, replace the hot pixel with its
         // neighbors' value.
-        return (((l + r) / 2) as u8, false, /*hot_pixel=*/true);
+        return (((l + r) / 2) as u8, /*interesting=*/true, /*hot_pixel=*/true);
     }
     // We require the border pixels to be ~uniformly dark. See if there
     // is too much brightness difference between the border pixels.
@@ -210,7 +232,7 @@ fn gate_star_1d(gate: &[u8], noise_estimate: f32, sigma: f32)
         return (c8, false, false);
     }
     // We have a candidate star from our 1d analysis!
-    return (c8, /*is_star_candidate=*/true, false);
+    return (c8, /*interesting=*/true, /*hot_pixel=*/false);
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -226,8 +248,7 @@ struct CandidateFromRowGate {
 // Discussion:
 // TODO.
 fn scan_image_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
-                       -> (Vec<CandidateFromRowGate>, u32)
-{
+                       -> (Vec<CandidateFromRowGate>, u32) {
     let row_scan_start = Instant::now();
     let mut hot_pixel_count = 0_u32;
     let (width, height) = image.dimensions();
@@ -243,16 +264,19 @@ fn scan_image_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
         let mut center_x = 2_u32;
         for gate in row_pixels.windows(7) {
             center_x += 1;
-            let (_pixel_value, is_star_candidate, is_hot_pixel) =
+            let (_pixel_value, is_interesting, is_hot_pixel) =
                 gate_star_1d(gate, noise_estimate, sigma);
-            if is_star_candidate {
-                debug!("Candidate at row {} col {}; gate {:?}",
-                       rownum, center_x, gate);
-                candidates.push(CandidateFromRowGate{x: center_x as i32,
-                                                     y: rownum as i32});
-            }
-            if is_hot_pixel {
-                hot_pixel_count += 1;
+            if is_interesting {
+                if is_hot_pixel {
+                    debug!("Hot pixel at row {} col {}; gate {:?}",
+                           rownum, center_x, gate);
+                    hot_pixel_count += 1;
+                } else {
+                    debug!("Candidate at row {} col {}; gate {:?}",
+                           rownum, center_x, gate);
+                    candidates.push(CandidateFromRowGate{x: center_x as i32,
+                                                         y: rownum as i32});
+                }
             }
         }
     }
@@ -539,13 +563,12 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
                          num_saturated})
 }
 
-// TODO: ROI
 // TODO: exhaustive_2d.
 // TODO: return roi summary, hot pixel count, noise estimate
 // TODO: doc.
 pub fn get_stars_from_image(image: &GrayImage, sigma: f32,
                             return_candidates: bool)
-                            -> (Vec<StarDescription>, u32) {
+                            -> (Vec<StarDescription>, u32, f32) {
     let mut noise_estimate = estimate_noise_from_image(image);
     if noise_estimate < 1.0 {
         // Likely the image background is crushed to black.
@@ -565,7 +588,7 @@ pub fn get_stars_from_image(image: &GrayImage, sigma: f32,
                 mean_brightness: 0_f32,
                 num_saturated: 0});
         }
-        return (stars, hot_pixel_count);
+        return (stars, hot_pixel_count, noise_estimate);
     }
     let blobs = form_blobs_from_candidates(candidates, image.height() as i32);
     let get_stars_start = Instant::now();
@@ -577,7 +600,7 @@ pub fn get_stars_from_image(image: &GrayImage, sigma: f32,
     }
     debug!("2d star gating found {} stars in {:?}",
           stars.len(), get_stars_start.elapsed());
-    (stars, hot_pixel_count)
+    (stars, hot_pixel_count, noise_estimate)
 }
 
 // The information here is from original pixel data (not background subtracted)
@@ -596,16 +619,8 @@ pub struct RegionOfInterestSummary {
     pub vertical_projection: Vec<f32>,
 }
 
-    // let roi_size = cmp::min(width, height) / 3;
-    // let roi = RegionOfInterest{x: (width - roi_size) / 2,
-    //                            y: (height - roi_size) / 2,
-    //                            width: roi_size, height: roi_size};
-    // While looking for star candidates, compute extra information for a
-    // moderate-sized square ROI in the center of the image.
-    // Discussion: TODO (center is likely to avoid bright interference during
-    // initial focus and centering interactions).
-// Gathers information the region of interest. The pixel data feeding this
-// information is not background subtracted, but hot pixels are replaced with
+// Gathers information the region of interest. The pixel values feeding this
+// information are not background subtracted, but hot pixels are replaced with
 // interpolated neighbor values.
 pub fn summarize_region_of_interest(image: &GrayImage, roi: &RegionOfInterest,
                                     noise_estimate: f32, sigma: f32)
@@ -638,7 +653,7 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &RegionOfInterest,
         let mut center_x = 2_u32;
         for gate in row_pixels.windows(7) {
             center_x += 1;
-            let (pixel_value, _is_star_candidate, _is_hot_pixel) =
+            let (pixel_value, _is_interesting, _is_hot_pixel) =
                 gate_star_1d(gate, noise_estimate, sigma);
             histogram[pixel_value as usize] += 1;
             horizontal_projection_sum[(rownum - roi.y) as usize]
@@ -659,3 +674,198 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &RegionOfInterest,
                             vertical_projection: v_proj,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    extern crate approx;
+    use approx::assert_abs_diff_eq;
+    use image::Luma;
+    use imageproc::noise::gaussian_noise;
+    use super::*;
+
+    #[test]
+    fn test_roi_contains() {
+        let empty = RegionOfInterest{x: 0, y: 0, width: 0, height: 0};
+        assert!(!empty.contains(0, 0));
+        assert!(!empty.contains(10, 0));
+        let unitary = RegionOfInterest{x: 10, y: 20, width: 1, height: 1};
+        assert!(unitary.contains(10, 20));
+        assert!(!unitary.contains(11, 20));
+        assert!(!unitary.contains(10, 21));
+        let onebytwo = RegionOfInterest{x: 3, y: 4, width: 1, height: 2};
+        assert!(onebytwo.contains(3, 4));
+        assert!(onebytwo.contains(3, 5));
+        assert!(!onebytwo.contains(4, 4));
+    }
+
+    #[test]
+    fn test_roi_is_corner() {
+        let empty = RegionOfInterest{x: 0, y: 0, width: 0, height: 0};
+        assert!(!empty.is_corner(0, 0));
+        let unitary = RegionOfInterest{x: 0, y: 0, width: 1, height: 1};
+        assert!(unitary.is_corner(0, 0));
+        assert!(!unitary.is_corner(0, 1));
+        assert!(!unitary.is_corner(1, 0));
+        let onebytwo = RegionOfInterest{x: 0, y: 0, width: 1, height: 2};
+        assert!(onebytwo.is_corner(0, 0));
+        assert!(onebytwo.is_corner(0, 1));
+        assert!(!onebytwo.is_corner(1, 0));
+        assert!(!onebytwo.is_corner(1, 1));
+        let square2 = RegionOfInterest{x: 10, y: 20, width: 2, height: 2};
+        assert!(square2.is_corner(10, 20));
+        assert!(square2.is_corner(10, 21));
+        assert!(square2.is_corner(11, 20));
+        assert!(square2.is_corner(11, 21));
+        let square3 = RegionOfInterest{x: 10, y: 20, width: 3, height: 3};
+        assert!(square3.is_corner(10, 20));
+        assert!(square3.is_corner(10, 22));
+        assert!(square3.is_corner(12, 20));
+        assert!(square3.is_corner(12, 22));
+        assert!(!square3.is_corner(10, 21));
+        assert!(!square3.is_corner(12, 21));
+        assert!(!square3.is_corner(11, 20));
+        assert!(!square3.is_corner(11, 22));
+        assert!(!square3.is_corner(11, 21));
+   }
+
+    #[test]
+    #[should_panic]
+    fn test_enumerate_pixels_roi_too_large() {
+        let empty_image = GrayImage::new(0, 0);
+        let _iter = EnumeratePixels::new(
+            &empty_image,
+            &RegionOfInterest{x: 0, y:0, width: 1, height: 1},
+            /*include_interior*/false);
+    }
+
+    #[test]
+    fn test_enumerate_pixels_image_empty() {
+        let empty_image = GrayImage::new(0, 0);
+        // The only valid iteration of an empty image is through an
+        // empty ROI.
+        let pixels: Vec<(u32, u32, u8)> =
+            EnumeratePixels::new(&empty_image,
+                                 &RegionOfInterest{x: 0, y:0, width: 0, height: 0},
+                                 /*include_interior*/false).collect();
+        assert_eq!(pixels.len(), 0);
+
+        // let empty_image = GrayImage::new(0, 0);
+        // assert!(EnumeratePixels::new(empty_image)
+    }
+
+    #[test]
+    fn test_enumerate_pixels_1x1() {
+        let mut image_1x1 = GrayImage::new(1, 1);
+        let grey = Luma::<u8>([127]);
+        image_1x1.put_pixel(0, 0, grey);
+        // Empty ROI.
+        let mut pixels: Vec<(u32, u32, u8)> =
+            EnumeratePixels::new(&image_1x1,
+                                 &RegionOfInterest{x: 0, y:0, width: 1, height: 0},
+                                 /*include_interior*/false).collect();
+        assert_eq!(pixels.len(), 0);
+
+        pixels = EnumeratePixels::new(&image_1x1,
+                                      &RegionOfInterest{x: 0, y:0, width: 1, height: 1},
+                                      /*include_interior*/false).collect();
+        assert_eq!(pixels, vec!((0_u32, 0_u32, 127_u8)));
+    }
+
+    #[test]
+    fn test_enumerate_pixels_3x3() {
+        let mut image_3x3 = GrayImage::new(3, 3);
+        let p0 = Luma::<u8>([0]);
+        let p1 = Luma::<u8>([1]);
+        let p2 = Luma::<u8>([2]);
+        let p127 = Luma::<u8>([127]);
+        let p253 = Luma::<u8>([253]);
+        let p254 = Luma::<u8>([254]);
+        let p255 = Luma::<u8>([255]);
+        image_3x3.put_pixel(0, 0, p0);
+        image_3x3.put_pixel(1, 0, p1);
+        image_3x3.put_pixel(2, 0, p2);
+        image_3x3.put_pixel(0, 1, p127);
+        image_3x3.put_pixel(1, 1, p253);
+        image_3x3.put_pixel(2, 1, p254);
+        image_3x3.put_pixel(0, 2, p255);
+        image_3x3.put_pixel(1, 2, p0);
+        image_3x3.put_pixel(2, 2, p1);
+        // Empty ROI.
+        let mut pixels: Vec<(u32, u32, u8)> =
+            EnumeratePixels::new(&image_3x3,
+                                 &RegionOfInterest{x: 1, y:0, width: 0, height: 1},
+                                 /*include_interior*/false).collect();
+        assert_eq!(pixels.len(), 0);
+
+        // Entire ROI, with interior.
+        pixels = EnumeratePixels::new(&image_3x3,
+                                      &RegionOfInterest{x: 0, y:0, width: 3, height: 3},
+                                      /*include_interior*/true).collect();
+        assert_eq!(pixels, vec!((0_u32, 0_u32, 0_u8),
+                                (1_u32, 0_u32, 1_u8),
+                                (2_u32, 0_u32, 2_u8),
+                                (0_u32, 1_u32, 127_u8),
+                                (1_u32, 1_u32, 253_u8),
+                                (2_u32, 1_u32, 254_u8),
+                                (0_u32, 2_u32, 255_u8),
+                                (1_u32, 2_u32, 0_u8),
+                                (2_u32, 2_u32, 1_u8)));
+        // Entire ROI, no interior.
+        pixels = EnumeratePixels::new(&image_3x3,
+                                      &RegionOfInterest{x: 0, y:0, width: 3, height: 3},
+                                      /*include_interior*/false).collect();
+        assert_eq!(pixels, vec!((0_u32, 0_u32, 0_u8),
+                                (1_u32, 0_u32, 1_u8),
+                                (2_u32, 0_u32, 2_u8),
+                                (0_u32, 1_u32, 127_u8),
+                                (2_u32, 1_u32, 254_u8),
+                                (0_u32, 2_u32, 255_u8),
+                                (1_u32, 2_u32, 0_u8),
+                                (2_u32, 2_u32, 1_u8)));
+    }
+
+    #[test]
+    fn test_stats_for_roi() {
+        let mut image_5x4 = GrayImage::new(5, 4);
+        // Leave image as all zeros for now.
+        let (mut mean, mut stddev) = stats_for_roi(
+            &image_5x4,
+            &RegionOfInterest{x: 0, y:0, width: 5, height: 4});
+        assert_eq!(mean, 0_f32);
+        assert_eq!(stddev, 0_f32);
+
+        // Single bright pixel. This is removed because we eliminate the 5%
+        // brightest pixels, and the image has 20 pixels, so we eliminate
+        // the single brightest pixel.
+        image_5x4.put_pixel(0, 0, Luma::<u8>([255]));
+        (mean, stddev) = stats_for_roi(
+            &image_5x4,
+            &RegionOfInterest{x: 0, y:0, width: 5, height: 4});
+        assert_eq!(mean, 0_f32);
+        assert_eq!(stddev, 0_f32);
+
+        // Add another non-zero pixel. This will be kept.
+        image_5x4.put_pixel(0, 1, Luma::<u8>([19]));
+        (mean, stddev) = stats_for_roi(
+            &image_5x4,
+            &RegionOfInterest{x: 0, y:0, width: 5, height: 4});
+        assert_eq!(mean, 1_f32);
+        assert_abs_diff_eq!(stddev, 4.24, epsilon = 0.01);
+    }
+
+    #[test]
+    fn test_estimate_noise_from_image() {
+        let small_image = gaussian_noise(&GrayImage::new(100, 100),
+                                         10.0, 3.0, 42);
+        // The stddev is a bit smaller than we generated because we discard the
+        // top 5% of values.
+        assert_abs_diff_eq!(estimate_noise_from_image(&small_image),
+                            2.7, epsilon = 0.1);
+        let large_image = gaussian_noise(&GrayImage::new(1000, 1000),
+                                         10.0, 3.0, 42);
+        assert_abs_diff_eq!(estimate_noise_from_image(&large_image),
+                            2.7, epsilon = 0.1);
+    }
+
+
+}  // mod tests.

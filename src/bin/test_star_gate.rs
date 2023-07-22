@@ -22,7 +22,7 @@ fn main() {
 
     let star_extraction_start = Instant::now();
     let return_candidates = false;
-    let (stars, _hot_pixel_count) =
+    let (stars, _hot_pixel_count, _noise_estimate) =
         get_stars_from_image(&img_u8, /*sigma=*/6.0, return_candidates);
     let elapsed = star_extraction_start.elapsed();
     info!("Star extraction found {} stars in {:?}", stars.len(), elapsed);
