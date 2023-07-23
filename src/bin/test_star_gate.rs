@@ -8,6 +8,7 @@ use log::{info};
 
 use star_gate::get_stars_from_image;
 
+// TODO: sigma on command line
 fn main() {
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info")).init();
@@ -21,7 +22,7 @@ fn main() {
 
     let star_extraction_start = Instant::now();
     let return_candidates = false;
-    let (stars, _hot_pixel_count, noise_estimate) =
+    let (mut stars, _hot_pixel_count, noise_estimate) =
         get_stars_from_image(&img_u8, /*sigma=*/6.0, return_candidates);
     let elapsed = star_extraction_start.elapsed();
     info!("Image WxH: {}x{}; noise level {}", width, height, noise_estimate);
@@ -29,6 +30,7 @@ fn main() {
     info!("{}ms per megapixel",
           elapsed.as_secs_f32() * 1000.0 / ((width * height) as f32 / 1000000_f32));
 
+    stars.sort_by(|a, b| b.mean_brightness.partial_cmp(&a.mean_brightness).unwrap());
     // Scribble marks into the image showing where we found stars.
     for star in stars {
         let x = star.centroid_x as u32;

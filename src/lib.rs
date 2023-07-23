@@ -62,7 +62,7 @@ impl<'a> Iterator for EnumeratePixels<'a> {
 }
 
 // Returns (mean, stddev) for the given image region. Excludes the brightest
-// 5% of pixels.
+// 2% of pixels.
 fn stats_for_roi(image: &GrayImage, roi: &Rect) -> (/*mean*/f32, /*stddev*/f32) {
     let mut histogram: [u32; 256] = [0; 256];
     for (_x, _y, pixel_value) in EnumeratePixels::new(
@@ -70,9 +70,9 @@ fn stats_for_roi(image: &GrayImage, roi: &Rect) -> (/*mean*/f32, /*stddev*/f32) 
         histogram[pixel_value as usize] += 1;
     }
     debug!("Original histogram: {:?}", histogram);
-    // Discard the top 5% of the histogram. We want only background pixels
+    // Discard the top 2% of the histogram. We want only background pixels
     // to contribute to the noise estimate.
-    let keep_count = (roi.width() * roi.height() * 95 / 100) as u32;
+    let keep_count = (roi.width() * roi.height() * 98 / 100) as u32;
     let mut kept_so_far = 0;
     let mut first_moment = 0;
     for h in 0..256 {
@@ -95,7 +95,7 @@ fn stats_for_roi(image: &GrayImage, roi: &Rect) -> (/*mean*/f32, /*stddev*/f32) 
 
 // Estimates the RMS noise of the given image. A small portion of the image
 // is processed as follows:
-// 1. The 5% brightest pixels are excluded.
+// 1. The 2% brightest pixels are excluded.
 // 2. The mean of the N remaining pixels is computed, and the standard
 //    deviation is computed in the usual way as
 //      sqrt(sum((pixel-mean)*(pixel-mean))/N)
@@ -180,8 +180,8 @@ fn gate_star_1d(gate: &[u8], sigma_noise_2: i16, sigma_noise_half: i16)
             return (c8, false, false);
         }
     }
-    // Average of l+r must be 0.25 * sigma * estimated noise brighter
-    // than the estimated background.
+    // Average of l+r must be 0.25 * sigma * estimated noise brighter than the
+    // estimated background.
     // Discussion: TODO.
     let sum_neighbors_over_background = l + r - est_background_2;
     if sum_neighbors_over_background < sigma_noise_half {
@@ -189,11 +189,11 @@ fn gate_star_1d(gate: &[u8], sigma_noise_2: i16, sigma_noise_half: i16)
         // neighbors' value.
         return (((l + r) / 2) as u8, /*interesting=*/true, /*hot_pixel=*/true);
     }
-    // We require the border pixels to be ~uniformly dark. See if there
-    // is too much brightness difference between the border pixels.
+    // We require the border pixels to be ~uniformly dark. See if there is too
+    // much brightness difference between the border pixels.
     // Discussion: TODO.
     let border_diff = (lb - rb).abs();
-    if border_diff > sigma_noise_half {
+    if border_diff > 3 * sigma_noise_half {
         return (c8, false, false);
     }
     // We have a candidate star from our 1d analysis!
@@ -501,7 +501,7 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
     // We require the perimeter pixels to be ~uniformly dark. See if any
     // perimeter pixel is too bright compared to the darkest perimeter
     // pixel.
-    if (perimeter_max - perimeter_min) as f32 > sigma * noise_estimate {
+    if (perimeter_max - perimeter_min) as f32 > 1.5 * sigma * noise_estimate {
         debug!("Perimeter too varied for blob {:?}", core);
         return None;
     }
@@ -754,7 +754,7 @@ mod tests {
         assert_eq!(mean, 0_f32);
         assert_eq!(stddev, 0_f32);
 
-        // Single bright pixel. This is removed because we eliminate the 5%
+        // Single bright pixel. This is removed because we eliminate the 2%
         // brightest pixels, and the image has 20 pixels, so we eliminate
         // the single brightest pixel.
         image_5x4.put_pixel(0, 0, Luma::<u8>([255]));
@@ -778,13 +778,13 @@ mod tests {
         let small_image = gaussian_noise(&GrayImage::new(100, 100),
                                          10.0, 3.0, 42);
         // The stddev is a bit smaller than we generated because we discard the
-        // top 5% of values.
+        // top 2% of values.
         assert_abs_diff_eq!(estimate_noise_from_image(&small_image),
-                            2.7, epsilon = 0.1);
+                            2.8, epsilon = 0.1);
         let large_image = gaussian_noise(&GrayImage::new(1000, 1000),
                                          10.0, 3.0, 42);
         assert_abs_diff_eq!(estimate_noise_from_image(&large_image),
-                            2.7, epsilon = 0.1);
+                            2.8, epsilon = 0.1);
     }
 
     #[test]
