@@ -21,9 +21,8 @@ fn main() {
     let (width, height) = img_u8.dimensions();
 
     let star_extraction_start = Instant::now();
-    let return_candidates = false;
     let (mut stars, _hot_pixel_count, noise_estimate) =
-        get_stars_from_image(&img_u8, /*sigma=*/6.0, return_candidates);
+        get_stars_from_image(&img_u8, /*sigma=*/6.0);
     let elapsed = star_extraction_start.elapsed();
     info!("Image WxH: {}x{}; noise level {}", width, height, noise_estimate);
     info!("Star extraction found {} stars in {:?}", stars.len(), elapsed);
@@ -48,19 +47,17 @@ fn main() {
             img_u8.put_pixel(x + 5, y, grey);
             img_u8.put_pixel(x + 6, y, grey);
         }
-        if !return_candidates {
-            if y > 6 {
-                // Draw top tick.
-                img_u8.put_pixel(x, y - 4, grey);
-                img_u8.put_pixel(x, y - 5, grey);
-                img_u8.put_pixel(x, y - 6, grey);
-            }
-            if y < height - 6 {
-                // Draw bottom tick.
-                img_u8.put_pixel(x, y + 4, grey);
-                img_u8.put_pixel(x, y + 5, grey);
-                img_u8.put_pixel(x, y + 6, grey);
-            }
+        if y > 6 {
+            // Draw top tick.
+            img_u8.put_pixel(x, y - 4, grey);
+            img_u8.put_pixel(x, y - 5, grey);
+            img_u8.put_pixel(x, y - 6, grey);
+        }
+        if y < height - 6 {
+            // Draw bottom tick.
+            img_u8.put_pixel(x, y + 4, grey);
+            img_u8.put_pixel(x, y + 5, grey);
+            img_u8.put_pixel(x, y + 6, grey);
         }
     }
     img_u8.save(output_file).unwrap();

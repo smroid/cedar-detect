@@ -6,13 +6,14 @@
 //!
 //! * Employs localized thresholding to tolerate changes in background levels
 //!   across the image.
+//! * Adapts to different image exposure levels.
 //! * Estimates noise in the image and adapts the star detection threshold
 //!   accordingly.
 //! * Automatically classifies and rejects hot pixels.
 //! * Rejects trailed objects such as aircraft lights or satellites.
 //! * Tolerates the presence of bright interlopers such as the moon or
 //!   streetlights.
-//! * Easy function call interface with very few parameters aside from the input
+//! * Simple function call interface with few parameters aside from the input
 //!   image.
 //! * Fast! On a Raspberry Pi 4B, the execution time per 1M image pixels is
 //!   around 5ms, even when several hundred stars are present in the image.
@@ -51,9 +52,19 @@
 //!
 //! # Caveats
 //!
+//! ## Crowding
+//!
+//! The criteria used by StarGate to efficiently detect stars are designed
+//! around the characteristics of a star image's pixels compared to surrounding
+//! pixels. StarGate can thus be confused when stars are too closely spaced, or
+//! a star is close to a hot pixel. Such situations will usually cause closely
+//! spaced stars to fail to be detected. Note that for applications such as
+//! plate solving, this is probably for the better. A star that is rejected
+//! because it is near a hot pixel is just a rare occurrence that we accept.
+//!
 //! ## Imaging requirements
 //!
-//! * StarGate only supports 8-bit grayscale images; color images or images with
+//! * StarGate supports only 8-bit grayscale images; color images or images with
 //!   greater bit depth must be converted before calling
 //!   [get_stars_from_image()].
 //! * The imaging exposure time and sensor gain are usually chosen to yield a
@@ -164,7 +175,7 @@ impl<'a> Iterator for EnumeratePixels<'a> {
 fn stats_for_roi(image: &GrayImage, roi: &Rect) -> (/*mean*/f32, /*stddev*/f32) {
     let mut histogram: [u32; 256] = [0; 256];
     for (_x, _y, pixel_value) in EnumeratePixels::new(
-        image, roi, /*include_interior=*/true) {
+        &image, &roi, /*include_interior=*/true) {
         histogram[pixel_value as usize] += 1;
     }
     debug!("Original histogram: {:?}", histogram);
@@ -222,29 +233,65 @@ fn estimate_noise_from_image(image: &GrayImage) -> f32 {
     stddev
 }
 
-// TODO: doc
-// Disucssion:
-// TODO. hot performance path
+// Given a candidate pixel, examines that pixel within a 7 pixel horizontal
+// context (the candidate pixel plus three neighbors on each side).
+//
+// We label the pixels as: lb lm l C r rm rb where:
+// lb: left border
+// lm: left margin
+// l:  left neighbor
+// C:  center or candidate pixel
+// r:  right neighbor
+// rm: right margin
+// rb: right border
+//
+// When the candidate pixel is the center pixel of a horizontal cut through a
+// star, we will observe/require the following:
+//
+// * The center pixel will be the brightest.
+// * The outermost border pixels are taken to reflect the local sky background
+//   value.
+// * The center pixel will be brighter than the sky background by a
+//   statistically significant amount.
+// * The left+right neighbors might not be as bright as the center pixel,
+//   but they will be at least somewhat brighter than the background. This
+//   criterion lets us reject single hot pixels.
+//
+// If a 7 pixel horizontal window satisfies these (and other; see the code)
+// criteria, the center pixel is flagged as being a candidate for futher
+// analysis. If any of these criteria are not met, the center pixel is deemed to
+// be NOT a star.
+//
+// Note that the left and right "margin" pixels don't figure into the above
+// narration; a 5-pixel horizontal window could be used instead. The margin
+// pixels allow a slightly higher degree of star defocus compared to what a 5
+// pixel window would permit.
+//
+// Statistical significance is defined as a 'sigma' multiple of the measured
+// image noise level. The `sigma_noise_2` argument is 2x the sigma*noise value,
+// and the `sigma_noise_half` argument is 0.5x the sigma*noise value.
+//
 // Returns:
-//   0: corrected pixel value to use for possible ROI processing. The value is
-//      not background subtracted, but care is taken to substitute hot pixel
-//      value with its neighboring pixel value.
-//   1: whether the gate's center pixel is "interesting" (either a star
+//   0: Corrected pixel value for use in summarize_region_of_interest(). The
+//      value is NOT background subtracted, but care is taken to substitute hot
+//      pixel value with its neighboring pixel value.
+//   1: Whether the gate's center pixel is "interesting" (either a star
 //      candidate or a hot pixel).
-//   2: whether the gate's center pixel is a hot pixel. If item 1 is true
-//      item 2 distinguishes whether it is hot pixel or star candidate.
+//   2: Whether the gate's center pixel is a hot pixel. If item 1 is true
+//      item 2 distinguishes whether it is hot pixel or star candidate. If item
+//      1 is false this item carries no meaning.
 fn gate_star_1d(gate: &[u8], sigma_noise_2: i16, sigma_noise_half: i16)
                 -> (/*corrected_value*/u8, /*interesting*/bool, /*hot_pixel*/bool) {
     debug_assert!(sigma_noise_2 > 0);
     debug_assert!(sigma_noise_half > 0);
     debug_assert!(sigma_noise_half <= sigma_noise_2);
-    let lb = gate[0] as i16;  // Left border.
-    let lm = gate[1] as i16;  // Left margin.
-    let l = gate[2] as i16;   // Left neighbor.
-    let c = gate[3] as i16;   // Center.
-    let r = gate[4] as i16;   // Right neighbor.
-    let rm = gate[5] as i16;  // Right margin.
-    let rb = gate[6] as i16;  // Right border.
+    let lb = gate[0] as i16;
+    let lm = gate[1] as i16;
+    let l = gate[2] as i16;
+    let c = gate[3] as i16;
+    let r = gate[4] as i16;
+    let rm = gate[5] as i16;
+    let rb = gate[6] as i16;
     let c8 = gate[3];
 
     // Center pixel must be sigma * estimated noise brighter than the estimated
@@ -280,7 +327,6 @@ fn gate_star_1d(gate: &[u8], sigma_noise_2: i16, sigma_noise_half: i16)
     }
     // Average of l+r must be 0.25 * sigma * estimated noise brighter than the
     // estimated background.
-    // Discussion: TODO.
     let sum_neighbors_over_background = l + r - est_background_2;
     if sum_neighbors_over_background < sigma_noise_half {
         // For ROI processing purposes, replace the hot pixel with its
@@ -289,7 +335,8 @@ fn gate_star_1d(gate: &[u8], sigma_noise_2: i16, sigma_noise_half: i16)
     }
     // We require the border pixels to be ~uniformly dark. See if there is too
     // much brightness difference between the border pixels.
-    // Discussion: TODO.
+    // The 3/2 sigma_noise threshold is empirically chosen to yield a low
+    // rejection rate for actual sky background border pixels.
     let border_diff = (lb - rb).abs();
     if border_diff > 3 * sigma_noise_half {
         return (c8, false, false);
@@ -304,12 +351,25 @@ struct CandidateFrom1D {
     y: i32,
 }
 
-// The candidates are returned in raster scan order.
+// Applies gate_star_1d() at all pixel positions of the image (excluding the few
+// leftmost and rightmost columns) to identify star candidates for futher
+// screening.
+// `image` Image to be scanned.
+// `noise_estimate` The noise level of the image. See estimate_noise_from_image().
+// `sigma` Specifies the multiple of the noise level by which a pixel must exceed
+//     the background to be considered a star candidate, in addition to
+//     satisfying other criteria.
 // Returns:
-// Vec<CandidateFrom1D>: the identifed star candidates
-// u32: count of hot pixels detected
-// Discussion:
-// TODO.
+// Vec<CandidateFrom1D>: the identifed star candidates, in raster scan order.
+// u32: count of hot pixels detected. Normally the hot pixel count is ~constant
+//     for a given image detector. We return this value to allow application
+//     logic to detect situations where too-sharp focus with large pixels can
+//     cause stars to be mis-classified as hot pixels. From an initial defocused
+//     state, as focus is improved, the number of detected star candidates
+//     rises, but as we advance into the too-focused regime, the number of
+//     detected star candidates will drop as the number of reported hot pixels
+//     rises. A rising hot pixel count can be a cue to the application logic
+//     that over-focusing is happening.
 fn scan_image_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
                        -> (Vec<CandidateFrom1D>, /*hot_pixel_count*/u32) {
     let row_scan_start = Instant::now();
@@ -366,7 +426,13 @@ struct LabeledCandidate {
     blob_id: i32,
 }
 
-// Discussion: TODO.
+// The scan_image_for_candidates() function can produce multiple candidates for
+// the same star. This typically happens for a bright star that has some
+// vertical extent such that multiple rows' horizontal cuts through the star
+// flag it as a candidate.
+//
+// The form_blobs_from_candidates() function gathers connected candidates into
+// blobs which can be further analyzed to determine if they are stars.
 fn form_blobs_from_candidates(candidates: Vec<CandidateFrom1D>)
                               -> Vec<Blob> {
     let blobs_start = Instant::now();
@@ -386,7 +452,6 @@ fn form_blobs_from_candidates(candidates: Vec<CandidateFrom1D>)
             LabeledCandidate{candidate, blob_id: next_blob_id});
         next_blob_id += 1;
     }
-
     // Merge adjacent blobs. Within a row blobs are not adjacent (by the nature of
     // how row scanning identifies candidates), so we just need to look for vertical
     // adjacencies.
@@ -440,27 +505,65 @@ fn form_blobs_from_candidates(candidates: Vec<CandidateFrom1D>)
     non_empty_blobs
 }
 
+/// Summarizes a star found by [get_stars_from_image()].
 #[derive(Debug)]
 pub struct StarDescription {
-    // Location of star centroid in image coordinates. (0.5, 0.5) corresponds
-    // to the center of the image's upper left pixel.
+    /// Location of star centroid in image coordinates. (0.5, 0.5) corresponds
+    /// to the center of the image's upper left pixel.
     pub centroid_x: f32,
     pub centroid_y: f32,
 
-    // Characterizes the extent or spread of the star in each direction, in
-    // pixel size units.
+    /// Characterizes the extent or spread of the star in each direction, in
+    /// pixel size units.
     pub stddev_x: f32,
     pub stddev_y: f32,
 
-    // Mean of the u8 pixel values of the star's region (core plus immediate
-    // neighbors). The estimated background is subtracted.
+    /// Mean of the u8 pixel values of the star's region (core plus immediate
+    /// neighbors). The estimated background is subtracted.
     pub mean_brightness: f32,
 
-    // Count of saturated pixel values.
+    /// Count of saturated pixel values.
     pub num_saturated: u16,
 }
 
-// TODO: doc.
+// The gate_star_2d() function is the 2-D analog of gate_star_1d(). While the
+// latter is simplistic because it is applied to every single image pixel, the
+// gate_star_2d() function can be more thorough because it is only applied to
+// hundreds or maybe thousands of candidates.
+//
+// A Blob is one or more candidates from gate_star_1d(), grouped together
+// by form_blobs_from_candidates(). We define the following terms:
+//
+// Core: this is the bounding box that includes all of the input Blob's pixel
+//   coordinates. In most cases the core consists of a single pixel, but for
+//   brighter stars it can span two or three rows. Confusing non-star regions of
+//   the image (such as the lunar terminator) can also yield multi-pixel cores.
+// Neighbors: the single pixel box surrounding the core.
+// Margin: the single pixel box surrounding neighbors.
+// Perimeter: the single pixel box surrounding margin.
+//
+// When the core contains a star, we will observe/require the following:
+//
+// * Core is not too large.
+// * Core is brightest.
+// * The perimeter pixels are taken to reflect the local sky background value.
+// * The core is brighter than the sky background by a statistically significant
+//   amount.
+// * The neighbor box might not be as bright as the core, but it will be at
+//   least somewhat brighter than the background. This criterion lets us reject
+//   single hot pixels.
+//
+// If a Blob and its surroundings satisfies these (and other; see the code)
+// criteria, a StarDescription is generated by performing centroiding on the
+// core+neighbor pixels. If any of these criteria are not met, the Blob
+// is deemed to be NOT a star.
+//
+// Note that the "margin" box isn't mentioned in the above narration. The margin
+// box allows some additional star defocus by pushing the sky background pixels
+// (perimeter box) out a bit.
+//
+// Statistical significance is defined as a `sigma` multiple of the
+// `noise_estimate`.
 fn gate_star_2d(blob: &Blob, image: &GrayImage,
                 noise_estimate: f32, sigma: f32,
                 max_width: u32, max_height: u32) -> Option<StarDescription> {
@@ -512,7 +615,7 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
     let mut core_sum: i32 = 0;
     let mut core_count: i32 = 0;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
-        image, &core, /*include_interior=*/true) {
+        &image, &core, /*include_interior=*/true) {
         core_sum += pixel_value as i32;
         core_count += 1;
     }
@@ -528,7 +631,7 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
         let mut outer_core_sum: i32 = 0;
         let mut outer_core_count: i32 = 0;
         for (_x, _y, pixel_value) in EnumeratePixels::new(
-            image, &core, /*include_interior=*/false) {
+            &image, &core, /*include_interior=*/false) {
             outer_core_sum += pixel_value as i32;
             outer_core_count += 1;
         }
@@ -546,7 +649,7 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
     let mut neighbor_sum: i32 = 0;
     let mut neighbor_count: i32 = 0;
     for (x, y, pixel_value) in EnumeratePixels::new(
-        image, &neighbors, /*include_interior=*/false) {
+        &image, &neighbors, /*include_interior=*/false) {
         let is_corner =
             (x == neighbors.left() || x == neighbors.right()) &&
             (y == neighbors.top() || y == neighbors.bottom());
@@ -569,7 +672,7 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
     let mut margin_sum: i32 = 0;
     let mut margin_count: i32 = 0;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
-        image, &margin, /*include_interior=*/false) {
+        &image, &margin, /*include_interior=*/false) {
         margin_sum += pixel_value as i32;
         margin_count += 1;
     }
@@ -587,7 +690,7 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
     let mut perimeter_min = u8::MAX;
     let mut perimeter_max = 0_u8;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
-        image, &perimeter, /*include_interior=*/false) {
+        &image, &perimeter, /*include_interior=*/false) {
         perimeter_sum += pixel_value as i32;
         perimeter_count += 1;
         perimeter_min = cmp::min(perimeter_min, pixel_value);
@@ -609,17 +712,24 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
         debug!("Core too weak for blob {:?}", core);
         return None;
     }
-    // Verify that the neighbor average exceeds background by
-    // 0.25 * sigma * noise.
-    if neighbor_mean - background_est < 0.25 * sigma * noise_estimate {
-        debug!("Neighbors too weak for blob {:?}", core);
-        return None;
+    if core_width == 1 && core_height == 1 {
+        // Verify that the neighbor average exceeds background by
+        // 0.25 * sigma * noise.
+        if neighbor_mean - background_est < 0.25 * sigma * noise_estimate {
+            // Hot pixel.
+            debug!("Neighbors too weak for blob {:?}", core);
+            return None;
+        }
     }
-
     // Star passes all of the 2d gates!
     Some(create_star_description(image, &neighbors, background_est))
 }
 
+// Called when gate_star_2d() determines that a Blob in detected as containing a
+// star.
+// neighbors: specifies the region encompassing the Blob plus a one pixel
+//     surround.
+// background_est: the average value of the "perimeter" pixels around the Blob.
 fn create_star_description(image: &GrayImage, neighbors: &Rect, background_est: f32)
                            -> StarDescription {
     // Process the interior pixels (core plus immediate neighbors) to
@@ -629,7 +739,7 @@ fn create_star_description(image: &GrayImage, neighbors: &Rect, background_est: 
     let mut m1x: f32 = 0.0;
     let mut m1y: f32 = 0.0;
     for (x, y, pixel_value) in EnumeratePixels::new(
-        image, &neighbors, /*include_interior=*/true) {
+        &image, &neighbors, /*include_interior=*/true) {
         if pixel_value == 255 {
             num_saturated += 1;
         }
@@ -645,7 +755,7 @@ fn create_star_description(image: &GrayImage, neighbors: &Rect, background_est: 
     let mut m2x_c: f32 = 0.0;
     let mut m2y_c: f32 = 0.0;
     for (x, y, pixel_value) in EnumeratePixels::new(
-        image, &neighbors, /*include_interior=*/true) {
+        &image, &neighbors, /*include_interior=*/true) {
         let val_minus_bkg = pixel_value as f32 - background_est;
         m2x_c += (x as f32 - centroid_x) * (x as f32 - centroid_x) * val_minus_bkg;
         m2y_c += (y as f32 - centroid_y) * (y as f32 - centroid_y) * val_minus_bkg;
