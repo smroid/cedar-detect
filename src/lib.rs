@@ -63,7 +63,7 @@ impl<'a> Iterator for EnumeratePixels<'a> {
 
 // Returns (mean, stddev) for the given image region. Excludes the brightest
 // 5% of pixels.
-fn stats_for_roi(image: &GrayImage, roi: &Rect) -> (f32, f32) {
+fn stats_for_roi(image: &GrayImage, roi: &Rect) -> (/*mean*/f32, /*stddev*/f32) {
     let mut histogram: [u32; 256] = [0; 256];
     for (_x, _y, pixel_value) in EnumeratePixels::new(
         image, roi, /*include_interior=*/true) {
@@ -135,8 +135,11 @@ fn estimate_noise_from_image(image: &GrayImage) -> f32 {
 //      candidate or a hot pixel).
 //   2: whether the gate's center pixel is a hot pixel. If item 1 is true
 //      item 2 distinguishes whether it is hot pixel or star candidate.
-fn gate_star_1d(gate: &[u8], sigma_noise_2: i16)
+fn gate_star_1d(gate: &[u8], sigma_noise_2: i16, sigma_noise_half: i16)
                 -> (/*corrected_value*/u8, /*interesting*/bool, /*hot_pixel*/bool) {
+    debug_assert!(sigma_noise_2 > 0);
+    debug_assert!(sigma_noise_half > 0);
+    debug_assert!(sigma_noise_half <= sigma_noise_2);
     let lb = gate[0] as i16;  // Left border.
     let lm = gate[1] as i16;  // Left margin.
     let l = gate[2] as i16;   // Left neighbor.
@@ -154,7 +157,6 @@ fn gate_star_1d(gate: &[u8], sigma_noise_2: i16)
     if center_over_background_2 < sigma_noise_2 {
         return (c8, false, false);
     }
-
     // Center pixel must be at least as bright as its immediate left/right
     // neighbors.
     if l > c || c < r {
@@ -162,10 +164,6 @@ fn gate_star_1d(gate: &[u8], sigma_noise_2: i16)
     }
     // Center pixel must be strictly brighter than its left/right margin.
     if lm >= c || c <= rm {
-        return (c8, false, false);
-    }
-    // Center pixel must be strictly brighter than the borders.
-    if lb >= c || c <= rb {
         return (c8, false, false);
     }
     if l == c {
@@ -186,7 +184,7 @@ fn gate_star_1d(gate: &[u8], sigma_noise_2: i16)
     // than the estimated background.
     // Discussion: TODO.
     let sum_neighbors_over_background = l + r - est_background_2;
-    if sum_neighbors_over_background < sigma_noise_2 / 4 {
+    if sum_neighbors_over_background < sigma_noise_half {
         // For ROI processing purposes, replace the hot pixel with its
         // neighbors' value.
         return (((l + r) / 2) as u8, /*interesting=*/true, /*hot_pixel=*/true);
@@ -195,7 +193,7 @@ fn gate_star_1d(gate: &[u8], sigma_noise_2: i16)
     // is too much brightness difference between the border pixels.
     // Discussion: TODO.
     let border_diff = (lb - rb).abs();
-    if border_diff > sigma_noise_2 / 4 {
+    if border_diff > sigma_noise_half {
         return (c8, false, false);
     }
     // We have a candidate star from our 1d analysis!
@@ -215,13 +213,14 @@ struct CandidateFromRowGate {
 // Discussion:
 // TODO.
 fn scan_image_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
-                       -> (Vec<CandidateFromRowGate>, u32) {
+                       -> (Vec<CandidateFromRowGate>, /*hot_pixel_count*/u32) {
     let row_scan_start = Instant::now();
     let mut hot_pixel_count = 0_u32;
     let (width, height) = image.dimensions();
     let image_pixels: &Vec<u8> = image.as_raw();
     let mut candidates = Vec::<CandidateFromRowGate>::new();
-    let sigma_noise_2 = (2.0 * sigma * noise_estimate) as i16;
+    let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate) as i16, 1);
+    let sigma_noise_half = cmp::max((0.5 * sigma * noise_estimate) as i16, 1);
     // We'll generally have way fewer than 1 candidate per row.
     candidates.reserve(height as usize);
     for rownum in 0..height {
@@ -233,7 +232,7 @@ fn scan_image_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
         for gate in row_pixels.windows(7) {
             center_x += 1;
             let (_pixel_value, is_interesting, is_hot_pixel) =
-                gate_star_1d(gate, sigma_noise_2);
+                gate_star_1d(gate, sigma_noise_2, sigma_noise_half);
             if is_interesting {
                 if is_hot_pixel {
                     debug!("Hot pixel at row {} col {}; gate {:?}",
@@ -269,11 +268,10 @@ struct LabeledCandidate {
 }
 
 // Discussion: TODO.
-fn form_blobs_from_candidates(candidates: Vec<CandidateFromRowGate>, height: i32)
+fn form_blobs_from_candidates(candidates: Vec<CandidateFromRowGate>)
                               -> Vec<Blob> {
     let blobs_start = Instant::now();
     let mut labeled_candidates_by_row = Vec::<Vec<LabeledCandidate>>::new();
-    labeled_candidates_by_row.resize(height as usize, Vec::<LabeledCandidate>::new());
 
     let mut blobs: HashMap<i32, Blob> = HashMap::new();
     let mut next_blob_id = 0;
@@ -281,16 +279,20 @@ fn form_blobs_from_candidates(candidates: Vec<CandidateFromRowGate>, height: i32
     for candidate in candidates {
         blobs.insert(next_blob_id, Blob{candidates: vec![candidate],
                                         recipient_blob: -1});
+        if candidate.y as usize >= labeled_candidates_by_row.len() {
+            labeled_candidates_by_row.resize(candidate.y as usize + 1,
+                                             Vec::<LabeledCandidate>::new());
+        }
         labeled_candidates_by_row[candidate.y as usize].push(
             LabeledCandidate{candidate, blob_id: next_blob_id});
         next_blob_id += 1;
     }
 
-    // Merge adjacent blobs. Within a row blobs are not adjacent (by definition of
+    // Merge adjacent blobs. Within a row blobs are not adjacent (by the nature of
     // how row scanning identifies candidates), so we just need to look for vertical
     // adjacencies.
     // Start processing at row 1 so we can look to previous row for blob merges.
-    for rownum in 1..height as usize {
+    for rownum in 1..labeled_candidates_by_row.len() {
         for rc in &labeled_candidates_by_row[rownum] {
             let rc_pos = rc.candidate.x;
             // See if rc is adjacent to any candidates in the previous row.
@@ -330,6 +332,7 @@ fn form_blobs_from_candidates(candidates: Vec<CandidateFromRowGate>, height: i32
     let mut non_empty_blobs = Vec::<Blob>::new();
     for (_id, blob) in blobs {
         if !blob.candidates.is_empty() {
+            assert!(blob.recipient_blob == -1);
             debug!("got blob {:?}", blob);
             non_empty_blobs.push(blob);
         }
@@ -355,7 +358,7 @@ pub struct StarDescription {
     pub mean_brightness: f32,
 
     // Count of saturated pixel values.
-    pub num_saturated: i32,
+    pub num_saturated: u16,
 }
 
 // TODO: doc.
@@ -493,6 +496,9 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
 
     // Star passes all of the 2d gates!
 
+    // TODO: refactor at this point. Separate qualification gate from
+    // candidate moment computation.
+
     // Process the interior pixels (core plus immediate neighbors) to
     // obtain moments. Also note the count of saturated pixels.
     let mut num_saturated = 0;
@@ -537,7 +543,8 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
 // TODO: doc.
 pub fn get_stars_from_image(image: &GrayImage, sigma: f32,
                             return_candidates: bool)
-                            -> (Vec<StarDescription>, u32, f32) {
+                            -> (Vec<StarDescription>,
+                                /*hot_pixel_count*/u32, /*noise_estimate*/f32) {
     let noise_estimate = estimate_noise_from_image(image);
     // If noise estimate is below 1.0, assume that the image background has been
     // crushed to black and use a minimum noise value.
@@ -559,7 +566,7 @@ pub fn get_stars_from_image(image: &GrayImage, sigma: f32,
         }
         return (stars, hot_pixel_count, noise_estimate);
     }
-    let blobs = form_blobs_from_candidates(candidates, image.height() as i32);
+    let blobs = form_blobs_from_candidates(candidates);
     let get_stars_start = Instant::now();
     for blob in blobs {
         match gate_star_2d(&blob, image, corrected_noise_estimate, sigma, 5, 5) {
@@ -612,7 +619,8 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
     horizontal_projection_sum.resize(roi.height() as usize, 0_u32);
     vertical_projection_sum.resize(roi.width() as usize, 0_u32);
 
-    let sigma_noise_2 = (2.0 * sigma * noise_estimate) as i16;
+    let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate) as i16, 1);
+    let sigma_noise_half = cmp::max((0.5 * sigma * noise_estimate) as i16, 1);
     for rownum in roi.top()..roi.bottom() + 1 {
         // Get the slice of image_pixels corresponding to this row of the ROI.
         let row_start = (rownum * width as i32) as usize;
@@ -624,7 +632,7 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
         for gate in row_pixels.windows(7) {
             center_x += 1;
             let (pixel_value, _is_interesting, _is_hot_pixel) =
-                gate_star_1d(gate, sigma_noise_2);
+                gate_star_1d(gate, sigma_noise_2, sigma_noise_half);
             histogram[pixel_value as usize] += 1;
             horizontal_projection_sum[(rownum - roi.top()) as usize]
                 += pixel_value as u32;
@@ -752,5 +760,243 @@ mod tests {
                             2.7, epsilon = 0.1);
     }
 
+    #[test]
+    fn test_gate_star_1d_center_bright_wrt_background() {
+        // Center minus background not bright enough.
+        let mut gate: [u8; 7] = [10, 10, 10, 12, 10, 10, 10];
+        let (mut value, mut interesting, mut hot_pixel) =
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
+        assert_eq!(value, 12);
+        assert!(!interesting);
+        assert!(!hot_pixel);
+
+        // Center minus background is bright enough.
+        gate = [10, 10, 11, 13, 11, 10, 10];
+        (value, interesting, hot_pixel) =
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
+        assert_eq!(value, 13);
+        assert!(interesting);
+        assert!(!hot_pixel);
+    }
+
+    #[test]
+    fn test_gate_star_1d_center_bright_wrt_neighbor() {
+        // Center is less than a neighbor.
+        let mut gate: [u8; 7] = [10, 10, 11, 13, 14, 10, 10];
+        let (mut value, mut interesting, mut hot_pixel) =
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
+        assert_eq!(value, 13);
+        assert!(!interesting);
+        assert!(!hot_pixel);
+
+        // Ditto, other neighbor.
+        gate = [10, 10, 14, 13, 11, 10, 10];
+        (value, interesting, hot_pixel) =
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
+        assert_eq!(value, 13);
+        assert!(!interesting);
+        assert!(!hot_pixel);
+
+        // Center is at least as bright as its neighbors. Tie break is to
+        // left (current candidate); this is explored further below.
+        gate = [10, 10, 11, 13, 13, 10, 10];
+        (value, interesting, hot_pixel) =
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
+        assert_eq!(value, 13);
+        assert!(interesting);
+        assert!(!hot_pixel);
+    }
+
+    #[test]
+    fn test_gate_star_1d_center_bright_wrt_margin() {
+        // Center is not brighter than a margin.
+        let mut gate: [u8; 7] = [10, 10, 11, 13, 11, 13, 10];
+        let (mut value, mut interesting, mut hot_pixel) =
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
+        assert_eq!(value, 13);
+        assert!(!interesting);
+        assert!(!hot_pixel);
+
+        // Ditto, other margin.
+        gate = [10, 13, 11, 13, 11, 10, 10];
+        (value, interesting, hot_pixel) =
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
+        assert_eq!(value, 13);
+        assert!(!interesting);
+        assert!(!hot_pixel);
+
+        // Center brighter than both margins.
+        gate = [10, 12, 11, 13, 11, 12, 10];
+        (value, interesting, hot_pixel) =
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
+        assert_eq!(value, 13);
+        assert!(interesting);
+        assert!(!hot_pixel);
+    }
+
+    #[test]
+    fn test_gate_star_1d_left_center_tie() {
+        // When center and left have same value, tie is broken
+        // based on next surrounding values.
+        // In this case, the tie breaks to the left.
+        let mut gate: [u8; 7] = [10, 11, 13, 13, 10, 11, 10];
+        let (mut value, mut interesting, mut hot_pixel) =
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
+        assert_eq!(value, 13);
+        assert!(!interesting);
+        assert!(!hot_pixel);
+
+        // Here, the tie breaks to the right (center pixel).
+        gate = [10, 11, 13, 13, 11, 11, 10];
+        (value, interesting, hot_pixel) =
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
+        assert_eq!(value, 13);
+        assert!(interesting);
+        assert!(!hot_pixel);
+    }
+
+    #[test]
+    fn test_gate_star_1d_center_right_tie() {
+        // When center and right have same value, tie is broken
+        // based on next surrounding values.
+        // In this case, the tie breaks to the right.
+        let mut gate: [u8; 7] = [10, 11, 11, 13, 13, 11, 10];
+        let (mut value, mut interesting, mut hot_pixel) =
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
+        assert_eq!(value, 13);
+        assert!(!interesting);
+        assert!(!hot_pixel);
+
+        // Here, the tie breaks to the left (center pixel).
+        gate = [10, 11, 11, 13, 13, 10, 10];
+        (value, interesting, hot_pixel) =
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
+        assert_eq!(value, 13);
+        assert!(interesting);
+        assert!(!hot_pixel);
+    }
+
+    #[test]
+    fn test_gate_star_1d_hot_pixel() {
+        // Neighbors are too dark, so bright center is deemed a hot pixel.
+        let mut gate: [u8; 7] = [10, 10, 10, 15, 11, 10, 10];
+        let (mut value, mut interesting, mut hot_pixel) =
+            gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_half=*/2);
+        assert_eq!(value, 10);
+        assert!(interesting);
+        assert!(hot_pixel);
+
+        // Neighbors have enough brighness, so bright center is deemed a
+        // star candidate.
+        gate = [10, 10, 11, 15, 11, 10, 10];
+        (value, interesting, hot_pixel) =
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/2);
+        assert_eq!(value, 15);
+        assert!(interesting);
+        assert!(!hot_pixel);
+    }
+
+    #[test]
+    fn test_gate_star_1d_unequal_border() {
+        // Border pixels differ too much, so candidate is rejected.
+        let mut gate: [u8; 7] = [12, 10, 12, 18, 13, 10, 9];
+        let (mut value, mut interesting, mut hot_pixel) =
+            gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_half=*/2);
+        assert_eq!(value, 18);
+        assert!(!interesting);
+        assert!(!hot_pixel);
+
+        // Borders are close enough now.
+        gate = [12, 10, 12, 18, 13, 10, 10];
+        (value, interesting, hot_pixel) =
+            gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_half=*/2);
+        assert_eq!(value, 18);
+        assert!(interesting);
+        assert!(!hot_pixel);
+    }
+
+    #[test]
+    fn test_gate_form_blobs_from_candidates() {
+        let mut candidates = Vec::<CandidateFromRowGate>::new();
+        // Candidates on the same row are not combined, even if they are close
+        // together. This is because, in practice due to the operation of
+        // gate_star_1d(), candiates in the same row will always be well
+        // separated.
+        candidates.push(CandidateFromRowGate{x: 20, y:3});
+        candidates.push(CandidateFromRowGate{x: 23, y:3});
+        let mut blobs = form_blobs_from_candidates(candidates);
+        assert_eq!(blobs.len(), 2);
+        assert_eq!(blobs[0].candidates.len(), 1);
+        assert_eq!(blobs[0].candidates[0].x, 20);
+        assert_eq!(blobs[0].candidates[0].y, 3);
+        assert_eq!(blobs[1].candidates.len(), 1);
+        assert_eq!(blobs[1].candidates[0].x, 23);
+        assert_eq!(blobs[1].candidates[0].y, 3);
+
+        // Candidates on adjacent rows are combined if they are close
+        // enough w.r.t. their horizontal offset.
+        // Not combined:
+        // . . . . . A . . . . . .
+        // . B . . . . . . . . . .
+        candidates = Vec::<CandidateFromRowGate>::new();
+        candidates.push(CandidateFromRowGate{x: 5, y:0});  // A.
+        candidates.push(CandidateFromRowGate{x: 1, y:1});  // B.
+        blobs = form_blobs_from_candidates(candidates);
+        assert_eq!(blobs.len(), 2);
+
+        // Combined:
+        // . . . . A . . . . . . .
+        // . B . . . . . . . . . .
+        candidates = Vec::<CandidateFromRowGate>::new();
+        candidates.push(CandidateFromRowGate{x: 4, y:0});  // A.
+        candidates.push(CandidateFromRowGate{x: 1, y:1});  // B.
+        blobs = form_blobs_from_candidates(candidates);
+        assert_eq!(blobs.len(), 1);
+
+        // Combined:
+        // . . . . A . . . . . . .
+        // . . . . B . . . . . . .
+        candidates = Vec::<CandidateFromRowGate>::new();
+        candidates.push(CandidateFromRowGate{x: 4, y:0});  // A.
+        candidates.push(CandidateFromRowGate{x: 4, y:1});  // B.
+        blobs = form_blobs_from_candidates(candidates);
+        assert_eq!(blobs.len(), 1);
+
+        // Combined:
+        // . . . . A . . . . . . .
+        // . . . . . . . B . . . .
+        candidates = Vec::<CandidateFromRowGate>::new();
+        candidates.push(CandidateFromRowGate{x: 4, y:0});  // A.
+        candidates.push(CandidateFromRowGate{x: 7, y:1});  // B.
+        blobs = form_blobs_from_candidates(candidates);
+        assert_eq!(blobs.len(), 1);
+
+        // Not combined:
+        // . . . . A . . . . . . .
+        // . . . . . . . . B . . .
+        candidates = Vec::<CandidateFromRowGate>::new();
+        candidates.push(CandidateFromRowGate{x: 4, y:0});  // A.
+        candidates.push(CandidateFromRowGate{x: 8, y:1});  // B.
+        blobs = form_blobs_from_candidates(candidates);
+        assert_eq!(blobs.len(), 2);
+
+        // In this case, B absorbs A and C. When D is reached, it sees that C
+        // has been absorbed into B and D thus absorbs B (and its already
+        // absorbed A and C).
+        // . A . . . C . . . . . .
+        // . . . B . . . D . . . .
+        candidates = Vec::<CandidateFromRowGate>::new();
+        candidates.push(CandidateFromRowGate{x: 1, y:0});  // A.
+        candidates.push(CandidateFromRowGate{x: 3, y:1});  // B.
+        candidates.push(CandidateFromRowGate{x: 5, y:0});  // C.
+        candidates.push(CandidateFromRowGate{x: 7, y:1});  // D.
+        blobs = form_blobs_from_candidates(candidates);
+        assert_eq!(blobs.len(), 1);
+        assert_eq!(blobs[0].candidates.len(), 4);
+    }
+
+    // TODO: tests for gate_star_2d()
+
+    // TODO: tests for summarize_region_of_interest()
 
 }  // mod tests.
