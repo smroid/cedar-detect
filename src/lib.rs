@@ -390,14 +390,14 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
 
     // Reject blob if it is too big.
     if core_width > max_width || core_height > max_height {
-        debug!("Blob {:?} too large", core);
+        println!("Blob {:?} too large", core);
         return None;
     }
     // Reject blob if its expansion goes past an image boundary.
     if core_x_min - 3 < 0 || core_x_max + 3 >= image_width as i32 ||
         core_y_min - 3 < 0 || core_y_max + 3 >= image_height as i32
     {
-        debug!("Blob {:?} too close to edge", core);
+        println!("Blob {:?} too close to edge", core);
         return None;
     }
 
@@ -419,6 +419,30 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
     }
     let core_mean = core_sum as f32 / core_count as f32;
 
+    if core_width >= 3 && core_height >= 3 {
+        // Require that the "inner" core be at least as bright as the outer
+        // core. This covers the case where the blob's candidates are e.g. a
+        // sunlit crater rim at the lunar terminator. These candidates could
+        // form an arc shape with a dark interior. Usually such cases will be
+        // rejected by the limit on the blob size, but we add an inner core
+        // brightness criterion here for completeness.
+        let mut outer_core_sum: i32 = 0;
+        let mut outer_core_count: i32 = 0;
+        for (_x, _y, pixel_value) in EnumeratePixels::new(
+            image, &core, /*include_interior=*/false) {
+            outer_core_sum += pixel_value as i32;
+            outer_core_count += 1;
+        }
+        let outer_core_mean = outer_core_sum as f32 / outer_core_count as f32;
+        // When including the inner core (core_mean), we should be at least as
+        // bright as when excluding the inner core (outer_core_mean).
+        if core_mean < outer_core_mean {
+            println!("Overall core average {} is less than outer core average {} for blob {:?}",
+                   core_mean, outer_core_mean, core);
+            return None;
+        }
+    }
+
     // Compute average of pixels in box immediately surrounding core.
     let mut neighbor_sum: i32 = 0;
     let mut neighbor_count: i32 = 0;
@@ -436,7 +460,7 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
     let neighbor_mean = neighbor_sum as f32 / neighbor_count as f32;
     // Core average must be at least as bright as the neighbor average.
     if core_mean < neighbor_mean {
-        debug!("Core average {} is less than neighbor average {} for blob {:?}",
+        println!("Core average {} is less than neighbor average {} for blob {:?}",
                core_mean, neighbor_mean, core);
         return None;
     }
@@ -453,7 +477,7 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
     let margin_mean = margin_sum as f32 / margin_count as f32;
     // Core average must be strictly brighter than the margin average.
     if core_mean <= margin_mean {
-        debug!("Core average {} is not greater than margin average {} for blob {:?}",
+        println!("Core average {} is not greater than margin average {} for blob {:?}",
                core_mean, margin_mean, core);
         return None;
     }
@@ -478,27 +502,29 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
     // perimeter pixel is too bright compared to the darkest perimeter
     // pixel.
     if (perimeter_max - perimeter_min) as f32 > sigma * noise_estimate {
-        debug!("Perimeter too varied for blob {:?}", core);
+        println!("Perimeter too varied for blob {:?}", core);
         return None;
     }
 
     // Verify that core average exceeds background by sigma * noise.
     if core_mean - background_est < sigma * noise_estimate {
-        debug!("Core too weak for blob {:?}", core);
+        println!("Core too weak for blob {:?}", core);
         return None;
     }
     // Verify that the neighbor average exceeds background by
     // 0.25 * sigma * noise.
     if neighbor_mean - background_est < 0.25 * sigma * noise_estimate {
-        debug!("Neighbors too weak for blob {:?}", core);
+        println!("Neighbors too weak for blob {:?}", core);
         return None;
     }
 
     // Star passes all of the 2d gates!
+    println!("candidate");  // TEMPORARY
+    Some(create_star_description(image, &neighbors, background_est))
+}
 
-    // TODO: refactor at this point. Separate qualification gate from
-    // candidate moment computation.
-
+fn create_star_description(image: &GrayImage, neighbors: &Rect, background_est: f32)
+                           -> StarDescription {
     // Process the interior pixels (core plus immediate neighbors) to
     // obtain moments. Also note the count of saturated pixels.
     let mut num_saturated = 0;
@@ -529,13 +555,13 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
     }
     let variance_x = m2x_c / m0;
     let variance_y = m2y_c / m0;
-    Some(StarDescription{centroid_x: (centroid_x + 0.5) as f32,
-                         centroid_y: (centroid_y + 0.5) as f32,
-                         stddev_x: variance_x.sqrt() as f32,
-                         stddev_y: variance_y.sqrt() as f32,
-                         mean_brightness:
-                         m0 / (neighbors.width() * neighbors.height()) as f32,
-                         num_saturated})
+    StarDescription{centroid_x: (centroid_x + 0.5) as f32,
+                    centroid_y: (centroid_y + 0.5) as f32,
+                    stddev_x: variance_x.sqrt() as f32,
+                    stddev_y: variance_y.sqrt() as f32,
+                    mean_brightness:
+                    m0 / (neighbors.width() * neighbors.height()) as f32,
+                    num_saturated}
 }
 
 // TODO: exhaustive_2d.
@@ -544,7 +570,8 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
 pub fn get_stars_from_image(image: &GrayImage, sigma: f32,
                             return_candidates: bool)
                             -> (Vec<StarDescription>,
-                                /*hot_pixel_count*/u32, /*noise_estimate*/f32) {
+                                /*hot_pixel_count*/u32, /*noise_estimate*/f32)
+{
     let noise_estimate = estimate_noise_from_image(image);
     // If noise estimate is below 1.0, assume that the image background has been
     // crushed to black and use a minimum noise value.
@@ -568,6 +595,7 @@ pub fn get_stars_from_image(image: &GrayImage, sigma: f32,
     }
     let blobs = form_blobs_from_candidates(candidates);
     let get_stars_start = Instant::now();
+    // TODO: make max_width/max_height an arg of get_stars_from_image().
     for blob in blobs {
         match gate_star_2d(&blob, image, corrected_noise_estimate, sigma, 5, 5) {
             Some(x) => stars.push(x),
@@ -995,7 +1023,46 @@ mod tests {
         assert_eq!(blobs[0].candidates.len(), 4);
     }
 
+    #[test]
+    fn test_gate_star_2d_too_large() {
+        let mut blob = Blob{candidates: Vec::<CandidateFromRowGate>::new(),
+                            recipient_blob: -1};
+        let image_9x9 = gray_image!(
+            9,  9,  9,  9,  9,  9,  9,  9, 9;
+            9,  9,  9,  9,  9,  9,  9,  9, 9;
+            9,  9, 11, 11, 11, 11, 11,  9, 9;
+            9,  9, 11, 18, 20, 19, 11,  9, 9;
+            9,  9, 11, 20, 30, 20, 11,  9, 9;
+            9,  9, 11, 19, 20, 19, 11,  9, 9;
+            9,  9, 11, 11, 11, 11, 11,  9, 9;
+            9,  9,  9,  9,  9,  9,  9,  9, 9;
+            9,  9,  9,  9,  9,  9,  9,  9, 9);
+        blob.candidates.push(CandidateFromRowGate{x: 3, y: 3});
+        blob.candidates.push(CandidateFromRowGate{x: 5, y: 5});
+        match gate_star_2d(&blob, &image_9x9, 1.0, 6.0,
+                           /*max_width=*/3, /*max_height=*/2) {
+            Some(_star_description) => panic!("Expected rejection"),
+            None => ()
+        }
+        match gate_star_2d(&blob, &image_9x9, 1.0, 6.0,
+                           /*max_width=*/2, /*max_height=*/3) {
+            Some(_star_description) => panic!("Expected rejection"),
+            None => ()
+        }
+        match gate_star_2d(&blob, &image_9x9, 1.0, 6.0,
+                           /*max_width=*/3, /*max_height=*/3) {
+            Some(_star_description) => (),
+            None => panic!("Expected candidate")
+        }
+    }
+
+    #[test]
+    fn test_gate_star_2d_image_boundary() {
+    }
+
     // TODO: tests for gate_star_2d()
+
+    // TODO: tests for create_star_description()
 
     // TODO: tests for summarize_region_of_interest()
 
