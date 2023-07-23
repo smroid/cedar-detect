@@ -253,6 +253,7 @@ fn scan_image_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
 }
 
 #[derive(Debug)]
+
 struct Blob {
     candidates: Vec<CandidateFromRowGate>,
 
@@ -390,14 +391,14 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
 
     // Reject blob if it is too big.
     if core_width > max_width || core_height > max_height {
-        println!("Blob {:?} too large", core);
+        debug!("Blob {:?} too large", core);
         return None;
     }
     // Reject blob if its expansion goes past an image boundary.
     if core_x_min - 3 < 0 || core_x_max + 3 >= image_width as i32 ||
         core_y_min - 3 < 0 || core_y_max + 3 >= image_height as i32
     {
-        println!("Blob {:?} too close to edge", core);
+        debug!("Blob {:?} too close to edge", core);
         return None;
     }
 
@@ -437,7 +438,7 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
         // When including the inner core (core_mean), we should be at least as
         // bright as when excluding the inner core (outer_core_mean).
         if core_mean < outer_core_mean {
-            println!("Overall core average {} is less than outer core average {} for blob {:?}",
+            debug!("Overall core average {} is less than outer core average {} for blob {:?}",
                    core_mean, outer_core_mean, core);
             return None;
         }
@@ -460,7 +461,7 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
     let neighbor_mean = neighbor_sum as f32 / neighbor_count as f32;
     // Core average must be at least as bright as the neighbor average.
     if core_mean < neighbor_mean {
-        println!("Core average {} is less than neighbor average {} for blob {:?}",
+        debug!("Core average {} is less than neighbor average {} for blob {:?}",
                core_mean, neighbor_mean, core);
         return None;
     }
@@ -475,9 +476,8 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
         margin_count += 1;
     }
     let margin_mean = margin_sum as f32 / margin_count as f32;
-    // Core average must be strictly brighter than the margin average.
     if core_mean <= margin_mean {
-        println!("Core average {} is not greater than margin average {} for blob {:?}",
+        debug!("Core average {} is not greater than margin average {} for blob {:?}",
                core_mean, margin_mean, core);
         return None;
     }
@@ -502,24 +502,23 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
     // perimeter pixel is too bright compared to the darkest perimeter
     // pixel.
     if (perimeter_max - perimeter_min) as f32 > sigma * noise_estimate {
-        println!("Perimeter too varied for blob {:?}", core);
+        debug!("Perimeter too varied for blob {:?}", core);
         return None;
     }
 
     // Verify that core average exceeds background by sigma * noise.
     if core_mean - background_est < sigma * noise_estimate {
-        println!("Core too weak for blob {:?}", core);
+        debug!("Core too weak for blob {:?}", core);
         return None;
     }
     // Verify that the neighbor average exceeds background by
     // 0.25 * sigma * noise.
     if neighbor_mean - background_est < 0.25 * sigma * noise_estimate {
-        println!("Neighbors too weak for blob {:?}", core);
+        debug!("Neighbors too weak for blob {:?}", core);
         return None;
     }
 
     // Star passes all of the 2d gates!
-    println!("candidate");  // TEMPORARY
     Some(create_star_description(image, &neighbors, background_est))
 }
 
@@ -597,7 +596,7 @@ pub fn get_stars_from_image(image: &GrayImage, sigma: f32,
     let get_stars_start = Instant::now();
     // TODO: make max_width/max_height an arg of get_stars_from_image().
     for blob in blobs {
-        match gate_star_2d(&blob, image, corrected_noise_estimate, sigma, 5, 5) {
+        match gate_star_2d(&blob, image, corrected_noise_estimate, sigma, 6, 6) {
             Some(x) => stars.push(x),
             None => ()
         }
@@ -953,6 +952,7 @@ mod tests {
         candidates.push(CandidateFromRowGate{x: 20, y:3});
         candidates.push(CandidateFromRowGate{x: 23, y:3});
         let mut blobs = form_blobs_from_candidates(candidates);
+        blobs.sort_by(|a, b| a.candidates[0].x.cmp(&b.candidates[0].x));
         assert_eq!(blobs.len(), 2);
         assert_eq!(blobs[0].candidates.len(), 1);
         assert_eq!(blobs[0].candidates[0].x, 20);
@@ -1028,17 +1028,19 @@ mod tests {
         let mut blob = Blob{candidates: Vec::<CandidateFromRowGate>::new(),
                             recipient_blob: -1};
         let image_9x9 = gray_image!(
-            9,  9,  9,  9,  9,  9,  9,  9, 9;
-            9,  9,  9,  9,  9,  9,  9,  9, 9;
-            9,  9, 11, 11, 11, 11, 11,  9, 9;
-            9,  9, 11, 18, 20, 19, 11,  9, 9;
-            9,  9, 11, 20, 30, 20, 11,  9, 9;
-            9,  9, 11, 19, 20, 19, 11,  9, 9;
-            9,  9, 11, 11, 11, 11, 11,  9, 9;
-            9,  9,  9,  9,  9,  9,  9,  9, 9;
-            9,  9,  9,  9,  9,  9,  9,  9, 9);
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9, 11, 11, 11, 11, 11,  9,  9;
+            9,  9, 11, 18, 20, 19, 11,  9,  9;
+            9,  9, 11, 20, 30, 20, 11,  9,  9;
+            9,  9, 11, 19, 20, 19, 11,  9,  9;
+            9,  9, 11, 11, 11, 11, 11,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9);
+        // Make 3x3 blob.
         blob.candidates.push(CandidateFromRowGate{x: 3, y: 3});
         blob.candidates.push(CandidateFromRowGate{x: 5, y: 5});
+        // 3x3 is too big.
         match gate_star_2d(&blob, &image_9x9, 1.0, 6.0,
                            /*max_width=*/3, /*max_height=*/2) {
             Some(_star_description) => panic!("Expected rejection"),
@@ -1049,6 +1051,7 @@ mod tests {
             Some(_star_description) => panic!("Expected rejection"),
             None => ()
         }
+        // We allow a 3x3 blob here.
         match gate_star_2d(&blob, &image_9x9, 1.0, 6.0,
                            /*max_width=*/3, /*max_height=*/3) {
             Some(_star_description) => (),
@@ -1058,11 +1061,240 @@ mod tests {
 
     #[test]
     fn test_gate_star_2d_image_boundary() {
+        let mut blob = Blob{candidates: Vec::<CandidateFromRowGate>::new(),
+                            recipient_blob: -1};
+        let image_7x7 = gray_image!(
+        9,  9,  9,  9,  9,  9,  9;
+        9, 10, 10, 10, 10, 10,  9;
+        9, 10, 12, 14, 12, 10,  9;
+        9, 10, 14, 30, 14, 10,  9;
+        9, 10, 12, 14, 12, 10,  9;
+        9, 10, 10, 10, 10, 10,  9;
+        9,  9,  9,  9,  9,  9,  9);
+        // Make 1x1 blob, but too far to the left.
+        blob.candidates.push(CandidateFromRowGate{x: 2, y: 3});
+        match gate_star_2d(&blob, &image_7x7, 1.0, 6.0, 3, 3) {
+            Some(_star_description) => panic!("Expected rejection"),
+            None => ()
+        }
+        // Too far to right.
+        blob.candidates.clear();
+        blob.candidates.push(CandidateFromRowGate{x: 4, y: 3});
+        match gate_star_2d(&blob, &image_7x7, 1.0, 6.0, 3, 3) {
+            Some(_star_description) => panic!("Expected rejection"),
+            None => ()
+        }
+        // Too high.
+        blob.candidates.clear();
+        blob.candidates.push(CandidateFromRowGate{x: 3, y: 2});
+        match gate_star_2d(&blob, &image_7x7, 1.0, 6.0, 3, 3) {
+            Some(_star_description) => panic!("Expected rejection"),
+            None => ()
+        }
+        // Too low.
+        blob.candidates.clear();
+        blob.candidates.push(CandidateFromRowGate{x: 3, y: 4});
+        match gate_star_2d(&blob, &image_7x7, 1.0, 6.0, 3, 3) {
+            Some(_star_description) => panic!("Expected rejection"),
+            None => ()
+        }
+        // Just right!
+        blob.candidates.clear();
+        blob.candidates.push(CandidateFromRowGate{x: 3, y: 3});
+        match gate_star_2d(&blob, &image_7x7, 1.0, 6.0, 3, 3) {
+            Some(_star_description) => (),
+            None => panic!("Expected candidate"),
+        }
     }
 
-    // TODO: tests for gate_star_2d()
+    #[test]
+    fn test_gate_star_2d_hollow_core() {
+        let mut blob = Blob{candidates: Vec::<CandidateFromRowGate>::new(),
+                            recipient_blob: -1};
+        let mut image_9x9 = gray_image!(
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9, 11, 11, 11, 11, 11,  9,  9;
+            9,  9, 11, 19, 20, 19, 11,  9,  9;
+            9,  9, 11, 20, 19, 20, 11,  9,  9;
+            9,  9, 11, 19, 20, 19, 11,  9,  9;
+            9,  9, 11, 11, 11, 11, 11,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9);
+        // Make 3x3 blob.
+        blob.candidates.push(CandidateFromRowGate{x: 3, y: 3});
+        blob.candidates.push(CandidateFromRowGate{x: 5, y: 5});
+        // Center of core is less bright than outer core.
+        match gate_star_2d(&blob, &image_9x9, 1.0, 6.0, 3, 3) {
+            Some(_star_description) => panic!("Expected rejection"),
+            None => (),
+        }
+        // Make center bright enough.
+        image_9x9.put_pixel(4, 4, Luma::<u8>([20]));
+        match gate_star_2d(&blob, &image_9x9, 1.0, 6.0, 3, 3) {
+            Some(_star_description) => (),
+            None => panic!("Expected candidate"),
+        }
+    }
 
-    // TODO: tests for create_star_description()
+    #[test]
+    fn test_gate_star_2d_core_bright_wrt_neighbor() {
+        let mut blob = Blob{candidates: Vec::<CandidateFromRowGate>::new(),
+                            recipient_blob: -1};
+        blob.candidates.push(CandidateFromRowGate{x: 3, y: 3});
+        let mut image_7x7 = gray_image!(
+        8,  8,  8,  8,  8,  8,  8;
+        8, 10, 10, 10, 10, 10,  8;
+        8, 10, 12, 14, 12, 10,  8;
+        8, 10, 14, 13, 14, 10,  8;
+        8, 10, 12, 14, 12, 10,  8;
+        8, 10, 10, 10, 10, 10,  8;
+        8,  8,  8,  8,  8,  8,  8);
+        // 1x1 core is less bright than neighbor average. Note that the
+        // neighbor corners are excluded.
+        match gate_star_2d(&blob, &image_7x7, 1.0, 6.0, 3, 3) {
+            Some(_star_description) => panic!("Expected rejection"),
+            None => (),
+        }
+        // Make center bright enough.
+        image_7x7.put_pixel(3, 3, Luma::<u8>([14]));
+        match gate_star_2d(&blob, &image_7x7, 1.0, 6.0, 3, 3) {
+            Some(_star_description) => (),
+            None => panic!("Expected candidate"),
+        }
+    }
+
+    #[test]
+    fn test_gate_star_2d_core_bright_wrt_margin() {
+        let mut blob = Blob{candidates: Vec::<CandidateFromRowGate>::new(),
+                            recipient_blob: -1};
+        blob.candidates.push(CandidateFromRowGate{x: 3, y: 3});
+        let mut image_7x7 = gray_image!(
+        8,  8,  8,  8,  8,  8,  8;
+        8, 14, 14, 14, 14, 14,  8;
+        8, 14, 12, 14, 12, 14,  8;
+        8, 14, 14, 14, 14, 14,  8;
+        8, 14, 12, 14, 12, 14,  8;
+        8, 14, 14, 14, 14, 14,  8;
+        8,  8,  8,  8,  8,  8,  8);
+        // 1x1 core is not brighter than margin average.
+        match gate_star_2d(&blob, &image_7x7, 1.0, 6.0, 3, 3) {
+            Some(_star_description) => panic!("Expected rejection"),
+            None => (),
+        }
+        // Make center bright enough.
+        image_7x7.put_pixel(3, 3, Luma::<u8>([15]));
+        match gate_star_2d(&blob, &image_7x7, 1.0, 6.0, 3, 3) {
+            Some(_star_description) => (),
+            None => panic!("Expected candidate"),
+        }
+    }
+
+    #[test]
+    fn test_gate_star_2d_nonuniform_perimeter() {
+        let mut blob = Blob{candidates: Vec::<CandidateFromRowGate>::new(),
+                            recipient_blob: -1};
+        blob.candidates.push(CandidateFromRowGate{x: 3, y: 3});
+        let mut image_7x7 = gray_image!(
+        9,  9,  9,  9,  9,  9,  9;
+        9, 10, 10, 10, 10, 10,  9;
+       20, 10, 12, 14, 12, 10,  9;
+        9, 10, 14, 30, 14, 10,  9;
+        9, 10, 12, 14, 12, 10,  9;
+        9, 10, 10, 10, 10, 10,  9;
+        9,  9,  9,  9,  9,  9,  9);
+        // Perimeter has an anomalously bright pixel.
+        match gate_star_2d(&blob, &image_7x7, 1.0, 6.0, 3, 3) {
+            Some(_star_description) => panic!("Expected rejection"),
+            None => (),
+        }
+        // Repair the perimeter.
+        image_7x7.put_pixel(0, 2, Luma::<u8>([12]));
+        match gate_star_2d(&blob, &image_7x7, 1.0, 6.0, 3, 3) {
+            Some(_star_description) => (),
+            None => panic!("Expected candidate"),
+        }
+    }
+
+    #[test]
+    fn test_gate_star_2d_core_bright_wrt_perimeter() {
+        let mut blob = Blob{candidates: Vec::<CandidateFromRowGate>::new(),
+                            recipient_blob: -1};
+        blob.candidates.push(CandidateFromRowGate{x: 3, y: 3});
+        let mut image_7x7 = gray_image!(
+        8,  8,  8,  8,  8,  8,  8;
+        8,  9,  9,  9,  9,  9,  8;
+        8,  9, 10, 11, 10,  9,  8;
+        8,  9, 11, 13, 11,  9,  8;
+        8,  9, 10, 11, 10,  9,  8;
+        8,  9,  9,  9,  9,  9,  8;
+        8,  8,  8,  8,  8,  8,  8);
+        // 1x1 core is not brighter enough than perimeter average.
+        match gate_star_2d(&blob, &image_7x7, 1.0, 6.0, 3, 3) {
+            Some(_star_description) => panic!("Expected rejection"),
+            None => (),
+        }
+        // Make center bright enough.
+        image_7x7.put_pixel(3, 3, Luma::<u8>([14]));
+        match gate_star_2d(&blob, &image_7x7, 1.0, 6.0, 3, 3) {
+            Some(_star_description) => (),
+            None => panic!("Expected candidate"),
+        }
+    }
+
+    #[test]
+    fn test_gate_star_2d_neighbor_bright_wrt_perimeter() {
+        let mut blob = Blob{candidates: Vec::<CandidateFromRowGate>::new(),
+                            recipient_blob: -1};
+        blob.candidates.push(CandidateFromRowGate{x: 3, y: 3});
+        let mut image_7x7 = gray_image!(
+        8,  8,  8,  8,  8,  8,  8;
+        8,  9,  9,  9,  9,  9,  8;
+        8,  9,  9,  9,  9,  9,  8;
+        8,  9,  9, 14,  9,  9,  8;
+        8,  9,  9,  9,  9,  9,  8;
+        8,  9,  9,  9,  9,  9,  8;
+        8,  8,  8,  8,  8,  8,  8);
+        // Neighbor ring is not brighter enough than perimeter average.
+        match gate_star_2d(&blob, &image_7x7, 1.0, 6.0, 3, 3) {
+            Some(_star_description) => panic!("Expected rejection"),
+            None => (),
+        }
+        // Make neighbors bright enough.
+        image_7x7.put_pixel(2, 2, Luma::<u8>([12]));
+        image_7x7.put_pixel(3, 2, Luma::<u8>([12]));
+        match gate_star_2d(&blob, &image_7x7, 1.0, 6.0, 3, 3) {
+            Some(_star_description) => (),
+            None => panic!("Expected candidate"),
+        }
+    }
+
+    #[test]
+    fn test_create_star_description() {
+        let image_7x7 = gray_image!(
+        9,  9,  9,   9,  9,  9,  9;
+        9, 10, 10,  10, 10, 10,  9;
+        9, 10, 12, 255, 12, 10,  9;
+        9, 10, 14, 255, 14, 10,  9;
+        9, 10, 12,  14, 30, 10,  9;
+        9, 10, 10,  10, 10, 10,  9;
+        9,  9,  9,   9,  9,  9,  9);
+        let neighbors = Rect::at(2, 2).of_size(3, 3);
+        let star_description = create_star_description(&image_7x7, &neighbors,
+                                                       /*background_est=*/9.0);
+        assert_abs_diff_eq!(star_description.centroid_x,
+                            3.53, epsilon = 0.01);
+        assert_abs_diff_eq!(star_description.centroid_y,
+                            3.08, epsilon = 0.01);
+        assert_abs_diff_eq!(star_description.stddev_x,
+                            0.27, epsilon = 0.01);
+        assert_abs_diff_eq!(star_description.stddev_y,
+                            0.59, epsilon = 0.01);
+        assert_abs_diff_eq!(star_description.mean_brightness,
+                            59.6, epsilon = 0.1);
+        assert_eq!(star_description.num_saturated, 2);
+    }
+
 
     // TODO: tests for summarize_region_of_interest()
 
