@@ -1295,7 +1295,49 @@ mod tests {
         assert_eq!(star_description.num_saturated, 2);
     }
 
+    #[test]
+    #[should_panic]
+    fn test_summarize_region_of_interest_left_edge() {
+        let roi = Rect::at(2, 0).of_size(3, 2);
+        let image_9x9 = gray_image!(
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9);
+        // Cannot give ROI too close to left edges.
+        let _roi_summary = summarize_region_of_interest(
+            &image_9x9, &roi, 1.0, 5.0);
+    }
 
-    // TODO: tests for summarize_region_of_interest()
+    #[test]
+    #[should_panic]
+    fn test_summarize_region_of_interest_right_edge() {
+        let roi = Rect::at(4, 0).of_size(3, 2);
+        let image_9x9 = gray_image!(
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9);
+        // Cannot give ROI too close to right edges.
+        let _roi_summary = summarize_region_of_interest(
+            &image_9x9, &roi, 1.0, 5.0);
+    }
+
+    #[test]
+    fn test_summarize_region_of_interest_good_edges() {
+        let roi = Rect::at(3, 0).of_size(3, 2);
+        // 80 is a hot pixel, is replaced by interpolation of its left
+        // and right neighbors.
+        let image_9x9 = gray_image!(
+            9,  9,  9,  7,  80,  9, 9,  9,  9;
+            9,  9,  9,  11, 20, 32, 9,  9,  9);
+        // ROI is correct distance from left+right edges.
+        let roi_summary = summarize_region_of_interest(
+            &image_9x9, &roi, 1.0, 5.0);
+        assert_eq!(roi_summary.histogram[7], 1);
+        assert_eq!(roi_summary.histogram[8], 1);
+        assert_eq!(roi_summary.histogram[9], 1);
+        assert_eq!(roi_summary.histogram[11], 1);
+        assert_eq!(roi_summary.histogram[20], 1);
+        assert_eq!(roi_summary.histogram[32], 1);
+        assert_eq!(roi_summary.horizontal_projection, [8.0, 21.0]);
+        assert_eq!(roi_summary.vertical_projection, [9.0, 14.0, 20.5]);
+    }
 
 }  // mod tests.
