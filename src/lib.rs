@@ -264,9 +264,9 @@ fn estimate_noise_from_image(image: &GrayImage) -> f32 {
 // be NOT a star.
 //
 // Note that the left and right "margin" pixels don't figure into the above
-// narration; a 5-pixel horizontal window could be used instead. The margin
-// pixels allow a slightly higher degree of star defocus compared to what a 5
-// pixel window would permit.
+// narration; a 5-pixel horizontal window might have been used instead. The
+// margin pixels allow a slightly higher degree of star defocus compared to what
+// a 5 pixel window would permit.
 //
 // Statistical significance is defined as a 'sigma' multiple of the measured
 // image noise level. The `sigma_noise_2` argument is 2x the sigma*noise value,
@@ -696,6 +696,8 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
     // We require the perimeter pixels to be ~uniformly dark. See if any
     // perimeter pixel is too bright compared to the darkest perimeter
     // pixel.
+    // The 3/2 sigma_noise threshold is empirically chosen to yield a low
+    // rejection rate for actual sky background perimeter pixels.
     if (perimeter_max - perimeter_min) as f32 > 1.5 * sigma * noise_estimate {
         debug!("Perimeter too varied for blob {:?}", core);
         return None;
@@ -719,7 +721,7 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
     Some(create_star_description(image, &neighbors, background_est))
 }
 
-// Called when gate_star_2d() determines that a Blob in detected as containing a
+// Called when gate_star_2d() determines that a Blob is detected as containing a
 // star.
 // neighbors: specifies the region encompassing the Blob plus a one pixel
 //     surround.
