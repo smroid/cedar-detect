@@ -38,15 +38,15 @@
 //! [get_stars_from_image()] in an attempt to increase the number of detected
 //! stars. Although StarGate requires evidence from multiple pixels to qualify
 //! each star detection (reducing the occurrence of false positives), noise
-//! always wins if you push `sigma` too low.
+//! inevitably wins if you push `sigma` too low.
 //!
 //! # Algorithm
 //!
-//! StarGate spends most of its time in a single efficient pass over the input
+//! StarGate spends most of its time on a single efficient pass over the input
 //! image. This generates a set of star candidates that are subjected to further
-//! scrutiny. The candidates number in the hundreds or perhaps thousands (much
-//! fewer than the number of image pixels), so the candidate filtering usually
-//! takes only a fraction of the overall time.
+//! scrutiny. The candidates number in the hundreds or perhaps thousands (thus
+//! much less than the number of image pixels), so the candidate evaluation
+//! usually takes only a fraction of the overall time.
 //!
 //! The code comments have much more detail.
 //!
@@ -60,7 +60,7 @@
 //! a star is close to a hot pixel. Such situations will usually cause closely
 //! spaced stars to fail to be detected. Note that for applications such as
 //! plate solving, this is probably for the better. A star that is rejected
-//! because it is near a hot pixel is just a rare occurrence that we accept.
+//! because it is near a hot pixel is a rare misfortune that we accept.
 //!
 //! ## Imaging requirements
 //!
@@ -73,7 +73,7 @@
 //!   StarGate will reject the bright star.
 //! * Pixel scale and focusing are crucial:
 //!   * If star images are too extended w.r.t. the pixel grid, StarGate will not
-//!     detect the stars. You either need to tighten the focus or use pixel
+//!     detect the stars. You'll either need to tighten the focus or use pixel
 //!     binning before calling [get_stars_from_image()].
 //!   * If pixels are too large w.r.t. the stars' images, StarGate will
 //!     mis-classify many stars as hot pixels. A simple remedy is to slightly
@@ -91,7 +91,7 @@
 //! * If a higher bit-depth image was converted to 8 bit for calling
 //!   [get_stars_from_image()], centroiding in the original image may yield
 //!   better accuracy.
-//! * The application can use a more sophisticated centroiding technique such as
+//! * The application can use a more artful centroiding technique such as
 //!   gaussian fitting.
 //!
 //! ## Lens distortions
@@ -210,7 +210,8 @@ fn stats_for_roi(image: &GrayImage, roi: &Rect) -> (/*mean*/f32, /*stddev*/f32) 
 //      sqrt(sum((pixel-mean)*(pixel-mean))/N)
 //
 // To guard against accidentally sampling a bright part of the image (moon?
-// streetlamp?), we sample a few image regions to find the darkest one.
+// streetlamp?), we sample a few image regions and choose the darkest one to
+// measure the noise.
 fn estimate_noise_from_image(image: &GrayImage) -> f32 {
     let noise_start = Instant::now();
     let (width, height) = image.dimensions();
@@ -236,7 +237,7 @@ fn estimate_noise_from_image(image: &GrayImage) -> f32 {
 // Given a candidate pixel, examines that pixel within a 7 pixel horizontal
 // context (the candidate pixel plus three neighbors on each side).
 //
-// We label the pixels as: lb lm l C r rm rb where:
+// We label the pixels as: |lb lm l C r rm rb| where:
 // lb: left border
 // lm: left margin
 // l:  left neighbor
@@ -361,15 +362,7 @@ struct CandidateFrom1D {
 //     satisfying other criteria.
 // Returns:
 // Vec<CandidateFrom1D>: the identifed star candidates, in raster scan order.
-// u32: count of hot pixels detected. Normally the hot pixel count is ~constant
-//     for a given image detector. We return this value to allow application
-//     logic to detect situations where too-sharp focus with large pixels can
-//     cause stars to be mis-classified as hot pixels. From an initial defocused
-//     state, as focus is improved, the number of detected star candidates
-//     rises, but as we advance into the too-focused regime, the number of
-//     detected star candidates will drop as the number of reported hot pixels
-//     rises. A rising hot pixel count can be a cue to the application logic
-//     that over-focusing is happening.
+// u32: count of hot pixels detected.
 fn scan_image_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
                        -> (Vec<CandidateFrom1D>, /*hot_pixel_count*/u32) {
     let row_scan_start = Instant::now();
@@ -429,10 +422,10 @@ struct LabeledCandidate {
 // The scan_image_for_candidates() function can produce multiple candidates for
 // the same star. This typically happens for a bright star that has some
 // vertical extent such that multiple rows' horizontal cuts through the star
-// flag it as a candidate.
+// all flag it as a candidate.
 //
 // The form_blobs_from_candidates() function gathers connected candidates into
-// blobs which can be further analyzed to determine if they are stars.
+// blobs which will be further analyzed to determine if they are stars.
 fn form_blobs_from_candidates(candidates: Vec<CandidateFrom1D>)
                               -> Vec<Blob> {
     let blobs_start = Instant::now();
@@ -526,7 +519,7 @@ pub struct StarDescription {
     pub num_saturated: u16,
 }
 
-// The gate_star_2d() function is the 2-D analog of gate_star_1d(). While the
+// The gate_star_2d() function is the 2-D version of gate_star_1d(). While the
 // latter is simplistic because it is applied to every single image pixel, the
 // gate_star_2d() function can be more thorough because it is only applied to
 // hundreds or maybe thousands of candidates.
@@ -536,8 +529,9 @@ pub struct StarDescription {
 //
 // Core: this is the bounding box that includes all of the input Blob's pixel
 //   coordinates. In most cases the core consists of a single pixel, but for
-//   brighter stars it can span two or three rows. Confusing non-star regions of
-//   the image (such as the lunar terminator) can also yield multi-pixel cores.
+//   brighter stars it can span multiple rows/columns. Confusing non-star
+//   regions of the image (such as the lunar terminator) can also yield
+//   multi-pixel cores.
 // Neighbors: the single pixel box surrounding the core.
 // Margin: the single pixel box surrounding neighbors.
 // Perimeter: the single pixel box surrounding margin.
@@ -771,8 +765,45 @@ fn create_star_description(image: &GrayImage, neighbors: &Rect, background_est: 
                     num_saturated}
 }
 
-// TODO: doc. Max star size arg.
-pub fn get_stars_from_image(image: &GrayImage, sigma: f32)
+/// This function runs the StarGate algorithm on the supplied `image`, returning
+/// a [StarDescription] for each detected star.
+///
+/// # Arguments
+///   `image` - The image to analyze. The entire image is scanned for stars,
+///   excluding the three leftmost and three rightmost columns.
+///
+///   `sigma` - Specifies the statistical significance threshold used for
+///   discriminating stars from background. Given a noise measure N, a pixel's
+///   value must be at least `sigma`*N greater than the background value in order
+///   to be considered a star candidate. Higher `sigma` values yield fewer
+///   stars; lower `sigma` values yield more stars but increase the likelihood
+///   of noise-induced false positives. Typical `sigma` values: 5-10.
+///
+///   `max_size` - StarGate clumps adjacent bright pixels to form a single star
+///   candidate. The `max_size` argument governs how large a clump can be before
+///   it is rejected. Note that making `max_size` small can eliminate very
+///   bright stars that "bleed" to many surrounding pixels. Typical `max_size`
+///   values: 3-5.
+///
+/// # Returns
+/// Vec<[StarDescription]>, in unspecified order.
+///
+/// u32: The number of hot pixels seen. See implementation for more information
+/// about hot pixels.
+///
+/// f32: The noise level measured from the image sky background.
+
+// A hot pixel is defined to be a single bright pixel whose immediate neighbors
+// are at sky background level. Normally the hot pixel count is ~constant for a
+// given image detector. get_stars_from_image() returns this value to allow
+// application logic to detect situations where too-sharp focus with large
+// pixels can cause stars to be mis-classified as hot pixels. From an initial
+// defocused state, as focus is improved, the number of detected stars rises,
+// but as we advance into the too-focused regime, the number of detected star
+// candidates will drop as the number of reported hot pixels rises. A rising hot
+// pixel count can be a cue to the application logic that over-focusing is
+// happening.
+pub fn get_stars_from_image(image: &GrayImage, sigma: f32, max_size: u32)
                             -> (Vec<StarDescription>,
                                 /*hot_pixel_count*/u32, /*noise_estimate*/f32)
 {
@@ -781,43 +812,59 @@ pub fn get_stars_from_image(image: &GrayImage, sigma: f32)
     // crushed to black and use a minimum noise value.
     let corrected_noise_estimate = f32::max(noise_estimate, 1.0);
 
+    let mut stars = Vec::<StarDescription>::new();
     let (candidates, hot_pixel_count) =
         scan_image_for_candidates(image, corrected_noise_estimate, sigma);
-    let mut stars = Vec::<StarDescription>::new();
-
-    let blobs = form_blobs_from_candidates(candidates);
-    let get_stars_start = Instant::now();
-    // TODO: make max_width/max_height an arg of get_stars_from_image().
-    for blob in blobs {
-        match gate_star_2d(&blob, image, corrected_noise_estimate, sigma, 6, 6) {
+    for blob in form_blobs_from_candidates(candidates) {
+        match gate_star_2d(&blob, image, corrected_noise_estimate,
+                           sigma, max_size, max_size) {
             Some(x) => stars.push(x),
             None => ()
         }
     }
-    debug!("2d star gating found {} stars in {:?}",
-          stars.len(), get_stars_start.elapsed());
     (stars, hot_pixel_count, noise_estimate)
 }
 
-// The information here is from original pixel data (not background subtracted)
-// but with hot pixels replaced with interpolated neighbor values.
+/// Summarizes an image region of interest. The pixel values used are not
+/// background subtracted. Single hot pixels are replaced with interpolated
+/// neighbor values.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct RegionOfInterestSummary {
-    // Histogram of pixel values in the ROI.
+    /// Histogram of pixel values in the ROI.
     pub histogram: [u32; 256],
 
-    // Each element is the mean of a row of the ROI. Size is thus the ROI height.
+    /// Each element is the mean of a row of the ROI. Size is thus the ROI height.
     pub horizontal_projection: Vec<f32>,
 
-    // Each element is the mean of a column of the ROI. Size is thus the ROI
-    // width.
+    /// Each element is the mean of a column of the ROI. Size is thus the ROI
+    /// width.
     pub vertical_projection: Vec<f32>,
 }
 
-// Gathers information the region of interest. The pixel values feeding this
-// information are not background subtracted, but hot pixels are replaced with
-// interpolated neighbor values.
+/// Gathers information from a region of interest of an image.
+///
+/// # Arguments
+///   `image` - The image of which a portion will be summarized.
+///
+///   `roi` - Specifies the portion of `image` to be summarized.
+///
+///   `noise_estimate` The noise level of `image`. This is typically the noise
+///   level returned by [get_stars_from_image()].
+///
+///   `sigma` - Specifies the statistical significance threshold used for
+///   discriminating hot pixels from background. This can be the same value as
+///   passed to [get_stars_from_image()].
+///
+/// # Returns
+/// [RegionOfInterestSummary] Information that compactly provides some information
+/// about the ROI. The `histogram` result can be used by an application's
+/// auto-exposure logic; the `horizontal_projection` and `vertical_projection`
+/// results can be used by an application to locate the brightest star in the
+/// ROI, even if it is severely out of focus.
+///
+/// # Panics
+/// The `roi` must exclude the three leftmost and three rightmost image columns.
 pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
                                     noise_estimate: f32, sigma: f32)
                                     -> RegionOfInterestSummary {
@@ -858,7 +905,6 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
                 += pixel_value as u32;
             vertical_projection_sum[(center_x - roi.left()) as usize]
                 += pixel_value as u32;
-
         }
     }
     let h_proj: Vec<f32> = horizontal_projection_sum.into_iter().map(
