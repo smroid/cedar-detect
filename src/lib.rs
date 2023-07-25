@@ -52,6 +52,11 @@
 //!
 //! # Caveats
 //!
+//! ## Star extraction only
+//!
+//! StarGate is designed to identify only stars. It is not a generalized
+//! astronomical source extraction system.
+//!
 //! ## Crowding
 //!
 //! The criteria used by StarGate to efficiently detect stars are designed
@@ -498,7 +503,7 @@ fn form_blobs_from_candidates(candidates: Vec<CandidateFrom1D>)
     non_empty_blobs
 }
 
-/// Summarizes a star found by [get_stars_from_image()].
+/// Summarizes a star-like spot found by [get_stars_from_image()].
 #[derive(Debug)]
 pub struct StarDescription {
     /// Location of star centroid in image coordinates. (0.5, 0.5) corresponds
@@ -514,6 +519,9 @@ pub struct StarDescription {
     /// Mean of the u8 pixel values of the star's region (core plus immediate
     /// neighbors). The estimated background is subtracted.
     pub mean_brightness: f32,
+
+    /// The estimated sky background near the star.
+    pub background: f32,
 
     /// Count of saturated pixel values.
     pub num_saturated: u16,
@@ -764,6 +772,7 @@ fn create_star_description(image: &GrayImage, neighbors: &Rect, background_est: 
                     stddev_y: variance_y.sqrt() as f32,
                     mean_brightness:
                     m0 / (neighbors.width() * neighbors.height()) as f32,
+                    background: background_est,
                     num_saturated}
 }
 
@@ -1522,7 +1531,7 @@ mod tests {
         9,  9,  9,   9,  9,  9,  9);
         let neighbors = Rect::at(2, 2).of_size(3, 3);
         let star_description = create_star_description(&image_7x7, &neighbors,
-                                                       /*background_est=*/9.0);
+                                                       /*background_est=*/9.01);
         assert_abs_diff_eq!(star_description.centroid_x,
                             3.53, epsilon = 0.01);
         assert_abs_diff_eq!(star_description.centroid_y,
@@ -1533,6 +1542,8 @@ mod tests {
                             0.59, epsilon = 0.01);
         assert_abs_diff_eq!(star_description.mean_brightness,
                             59.6, epsilon = 0.1);
+        assert_abs_diff_eq!(star_description.background,
+                            9.01, epsilon = 0.01);
         assert_eq!(star_description.num_saturated, 2);
     }
 

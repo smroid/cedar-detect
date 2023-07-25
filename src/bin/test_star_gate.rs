@@ -16,7 +16,7 @@ use star_gate::get_stars_from_image;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about=None)]
 struct Args {
-    /// Name of the file or directory to process.
+    /// Path of the file or directory to process.
     #[arg(short, long)]
     input: String,
 
@@ -31,6 +31,10 @@ struct Args {
     /// Maximum star size.
     #[arg(short, long, default_value_t = 5)]
     max_size: u32,
+
+    /// Output list of star centroids.
+    #[arg(short, long, default_value_t = false)]
+    coords: bool,
 }
 
 fn main() {
@@ -48,22 +52,23 @@ fn main() {
             "Output '{}' must be a directory", args.output);
     if input_metadata.is_dir() {
         // Enumerate and process all of the files in the directory.
-        for entry in fs::read_dir(args.input).unwrap() {
+        for entry in fs::read_dir(&args.input).unwrap() {
             let path = entry.unwrap().path();
             if path.is_file() {
-                process_file(path.to_str().unwrap(), &args.output, args.sigma, args.max_size);
+                process_file(path.to_str().unwrap(), &args);
             }
         }
     } else {
+        // Process the single file.
         assert!(input_metadata.is_file());
-        process_file(args.input.as_str(), args.output.as_str(), args.sigma, args.max_size);
+        process_file(args.input.as_str(), &args);
     }
 }
 
-fn process_file(file: &str, output_dir: &str, sigma: f32, max_size: u32) {
+fn process_file(file: &str, args: &Args) {
     info!("Processing {}", file);
     let input_path = PathBuf::from(&file);
-    let mut output_path = PathBuf::from(output_dir);
+    let mut output_path = PathBuf::from(&args.output);
     output_path.push(input_path.file_name().unwrap());
     output_path.set_extension("bmp");
 
@@ -79,7 +84,7 @@ fn process_file(file: &str, output_dir: &str, sigma: f32, max_size: u32) {
 
     let star_extraction_start = Instant::now();
     let (mut stars, _hot_pixel_count, noise_estimate) =
-        get_stars_from_image(&img_u8, sigma, max_size);
+        get_stars_from_image(&img_u8, args.sigma, args.max_size);
     let elapsed = star_extraction_start.elapsed();
     info!("WxH: {}x{}; noise level {}", width, height, noise_estimate);
     info!("Star extraction found {} stars in {:?}", stars.len(), elapsed);
@@ -101,4 +106,15 @@ fn process_file(file: &str, output_dir: &str, sigma: f32, max_size: u32) {
             Luma::<u8>([circle_brightness]));
     }
     img_u8.save(output_path).unwrap();
+    if args.coords {
+        let mut coords_str = String::new();
+        coords_str.push_str(format!("# WxH {}x{}\n", width, height).as_str());
+        coords_str.push_str("# (y, x)\n");
+        for star in stars {
+            coords_str.push_str(format!(
+                "({}, {}),\n",
+                star.centroid_y, star.centroid_x).as_str());
+        }
+        info!("{}", coords_str);
+    }
 }
