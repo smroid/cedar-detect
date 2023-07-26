@@ -1,0 +1,19 @@
+Map hot pixels with a dark exposure.
+  Benefit: Can run with tight focus (don't need to insist on a spread to
+    adjacent pixels). This can yield marginally higher signal to noise by
+    concentrating all of a star's intensity into a single pixel, allowing
+    for marginally shorter exposures.
+  Drawback: Adds a workflow complication, need the user's involvement in
+    capturing the dark frame.
+
+
+During scan_image_for_candidates(), we can cheaply compute the 2x2 binning of
+the input image, while healing hot pixels. The binned image can then be itself
+passed to scan_image_for_candidates(), turning off hot pixel detection. Benefit:
+if full-res input doesn't yield stars because camera is moving, the 2x lower
+resolution image's streaks might be small enough to allow star detections. IOW,
+we get 2x the motion tolerance. And while processing the 2x2 binned image, we
+can bin again to 4x4 binned, and again search for stars with now 4x motion
+tolerance.
+
+Question: How low can the image resolution go before Tetra3 fails?

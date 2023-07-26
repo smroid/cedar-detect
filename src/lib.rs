@@ -281,13 +281,15 @@ fn estimate_noise_from_image(image: &GrayImage) -> f32 {
 //   0: Corrected pixel value for use in summarize_region_of_interest(). The
 //      value is NOT background subtracted, but care is taken to substitute hot
 //      pixel value with its neighboring pixel value.
-//   1: Whether the gate's center pixel is "interesting" (either a star
-//      candidate or a hot pixel).
-//   2: Whether the gate's center pixel is a hot pixel. If item 1 is true
-//      item 2 distinguishes whether it is hot pixel or star candidate. If item
-//      1 is false this item carries no meaning.
+//   1: Whether the gate's center pixel is a star candidate, a hot pixel, or
+//      uninteresting.
+enum ResultType {
+    Uninteresting,
+    Candidate,
+    HotPixel,
+}
 fn gate_star_1d(gate: &[u8], sigma_noise_2: i16, sigma_noise_half: i16)
-                -> (/*corrected_value*/u8, /*interesting*/bool, /*hot_pixel*/bool) {
+                -> (/*corrected_value*/u8, ResultType) {
     debug_assert!(sigma_noise_2 > 0);
     debug_assert!(sigma_noise_half > 0);
     debug_assert!(sigma_noise_half <= sigma_noise_2);
@@ -306,29 +308,29 @@ fn gate_star_1d(gate: &[u8], sigma_noise_2: i16, sigma_noise_half: i16)
     let est_background_2 = lb + rb;
     let center_over_background_2 = c + c - est_background_2;
     if center_over_background_2 < sigma_noise_2 {
-        return (c8, false, false);
+        return (c8, ResultType::Uninteresting);
     }
     // Center pixel must be at least as bright as its immediate left/right
     // neighbors.
     if l > c || c < r {
-        return (c8, false, false);
+        return (c8, ResultType::Uninteresting);
     }
     // Center pixel must be strictly brighter than its left/right margin.
     if lm >= c || c <= rm {
-        return (c8, false, false);
+        return (c8, ResultType::Uninteresting);
     }
     if l == c {
         // Break tie between left and center.
         if lm > r {
             // Left will have been the center of its own candidate entry.
-            return (c8, false, false);
+            return (c8, ResultType::Uninteresting);
         }
     }
     if c == r {
         // Break tie between center and right.
         if l <= rm {
             // Right will be the center of its own candidate entry.
-            return (c8, false, false);
+            return (c8, ResultType::Uninteresting);
         }
     }
     // Average of l+r must be 0.25 * sigma * estimated noise brighter than the
@@ -337,7 +339,7 @@ fn gate_star_1d(gate: &[u8], sigma_noise_2: i16, sigma_noise_half: i16)
     if sum_neighbors_over_background < sigma_noise_half {
         // For ROI processing purposes, replace the hot pixel with its
         // neighbors' value.
-        return (((l + r) / 2) as u8, /*interesting=*/true, /*hot_pixel=*/true);
+        return (((l + r) / 2) as u8, ResultType::HotPixel);
     }
     // We require the border pixels to be ~uniformly dark. See if there is too
     // much brightness difference between the border pixels.
@@ -345,10 +347,10 @@ fn gate_star_1d(gate: &[u8], sigma_noise_2: i16, sigma_noise_half: i16)
     // rejection rate for actual sky background border pixels.
     let border_diff = (lb - rb).abs();
     if border_diff > 3 * sigma_noise_half {
-        return (c8, false, false);
+        return (c8, ResultType::Uninteresting);
     }
     // We have a candidate star from our 1d analysis!
-    return (c8, /*interesting=*/true, /*hot_pixel=*/false);
+    return (c8, ResultType::Candidate);
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -387,19 +389,21 @@ fn scan_image_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
         let mut center_x = 2_u32;
         for gate in row_pixels.windows(7) {
             center_x += 1;
-            let (_pixel_value, is_interesting, is_hot_pixel) =
+            let (_pixel_value, result_type) =
                 gate_star_1d(gate, sigma_noise_2, sigma_noise_half);
-            if is_interesting {
-                if is_hot_pixel {
-                    debug!("Hot pixel at row {} col {}; gate {:?}",
-                           rownum, center_x, gate);
-                    hot_pixel_count += 1;
-                } else {
+            match result_type {
+                ResultType::Uninteresting => (),
+                ResultType::Candidate => {
                     debug!("Candidate at row {} col {}; gate {:?}",
                            rownum, center_x, gate);
                     candidates.push(CandidateFrom1D{x: center_x as i32,
                                                          y: rownum as i32});
-                }
+                },
+                ResultType::HotPixel => {
+                    debug!("Hot pixel at row {} col {}; gate {:?}",
+                           rownum, center_x, gate);
+                    hot_pixel_count += 1;
+                },
             }
         }
     }
@@ -909,7 +913,7 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
         let mut center_x = 2;
         for gate in row_pixels.windows(7) {
             center_x += 1;
-            let (pixel_value, _is_interesting, _is_hot_pixel) =
+            let (pixel_value, _result_type) =
                 gate_star_1d(gate, sigma_noise_2, sigma_noise_half);
             histogram[pixel_value as usize] += 1;
             horizontal_projection_sum[(rownum - roi.top()) as usize]
