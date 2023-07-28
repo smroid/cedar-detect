@@ -17,3 +17,13 @@ can bin again to 4x4 binned, and again search for stars with now 4x motion
 tolerance.
 
 Question: How low can the image resolution go before Tetra3 fails?
+
+But: this won't work? Consider an unbinned image exposed such that a star is
+mostly concentrated in one pixel, and at the edge of detection. Now apply 2x2
+binning. The star's intensity drops by 4x; the noise background drops by sqrt(4)
+or 2x. Thus our SNR drops 2x, and if the original image had the star at the
+edge of detection, we'll lose it at 2x2 binning. And so we'll need to increase
+the exposure time, and thus incur more motion streaking?
+
+Need to play with this in practice to see the effect binning has on detection
+threshold...
