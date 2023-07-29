@@ -293,13 +293,18 @@ fn gate_star_1d(gate: &[u8], sigma_noise_2: i16, sigma_noise_half: i16)
     debug_assert!(sigma_noise_2 > 0);
     debug_assert!(sigma_noise_half > 0);
     debug_assert!(sigma_noise_half <= sigma_noise_2);
+    // Examining assembler output suggests that fetching these exterior pixels
+    // first eliminates bounds checks on the interior pixels. I would have
+    // thought that the compiler would do this... in any case, the measured
+    // performance doesn't seem to change.
     let lb = gate[0] as i16;
+    let rb = gate[6] as i16;
+
     let lm = gate[1] as i16;
     let l = gate[2] as i16;
     let c = gate[3] as i16;
     let r = gate[4] as i16;
     let rm = gate[5] as i16;
-    let rb = gate[6] as i16;
     let c8 = gate[3];
 
     // Center pixel must be sigma * estimated noise brighter than the estimated
