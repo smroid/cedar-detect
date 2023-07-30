@@ -283,6 +283,7 @@ fn estimate_noise_from_image(image: &GrayImage) -> f32 {
 //      pixel value with its neighboring pixel value.
 //   1: Whether the gate's center pixel is a star candidate, a hot pixel, or
 //      uninteresting.
+#[derive(Debug, Eq, PartialEq)]
 enum ResultType {
     Uninteresting,
     Candidate,
@@ -418,7 +419,6 @@ fn scan_image_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
 }
 
 #[derive(Debug)]
-
 struct Blob {
     candidates: Vec<CandidateFrom1D>,
 
@@ -908,7 +908,7 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
 
     let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate) as i16, 1);
     let sigma_noise_half = cmp::max((0.5 * sigma * noise_estimate) as i16, 1);
-    for rownum in roi.top()..roi.bottom() + 1 {
+    for rownum in roi.top()..=roi.bottom() {
         // Get the slice of image_pixels corresponding to this row of the ROI.
         let row_start = (rownum * width as i32) as usize;
         let row_pixels: &[u8] = &image_pixels.as_slice()
@@ -1050,74 +1050,66 @@ mod tests {
     fn test_gate_star_1d_center_bright_wrt_background() {
         // Center minus background not bright enough.
         let mut gate: [u8; 7] = [10, 10, 10, 12, 10, 10, 10];
-        let (mut value, mut interesting, mut hot_pixel) =
+        let (mut value, mut result_type) =
             gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
         assert_eq!(value, 12);
-        assert!(!interesting);
-        assert!(!hot_pixel);
+        assert_eq!(result_type, ResultType::Uninteresting);
 
         // Center minus background is bright enough.
         gate = [10, 10, 11, 13, 11, 10, 10];
-        (value, interesting, hot_pixel) =
+        (value, result_type) =
             gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
         assert_eq!(value, 13);
-        assert!(interesting);
-        assert!(!hot_pixel);
+        assert_eq!(result_type, ResultType::Candidate);
     }
 
     #[test]
     fn test_gate_star_1d_center_bright_wrt_neighbor() {
         // Center is less than a neighbor.
         let mut gate: [u8; 7] = [10, 10, 11, 13, 14, 10, 10];
-        let (mut value, mut interesting, mut hot_pixel) =
+        let (mut value, mut result_type) =
             gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
         assert_eq!(value, 13);
-        assert!(!interesting);
-        assert!(!hot_pixel);
+        assert_eq!(result_type, ResultType::Uninteresting);
 
         // Ditto, other neighbor.
         gate = [10, 10, 14, 13, 11, 10, 10];
-        (value, interesting, hot_pixel) =
+        (value, result_type) =
             gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
         assert_eq!(value, 13);
-        assert!(!interesting);
-        assert!(!hot_pixel);
+        assert_eq!(result_type, ResultType::Uninteresting);
 
         // Center is at least as bright as its neighbors. Tie break is to
         // left (current candidate); this is explored further below.
         gate = [10, 10, 11, 13, 13, 10, 10];
-        (value, interesting, hot_pixel) =
+        (value, result_type) =
             gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
         assert_eq!(value, 13);
-        assert!(interesting);
-        assert!(!hot_pixel);
+        assert_eq!(result_type, ResultType::Candidate);
     }
 
     #[test]
     fn test_gate_star_1d_center_bright_wrt_margin() {
         // Center is not brighter than a margin.
         let mut gate: [u8; 7] = [10, 10, 11, 13, 11, 13, 10];
-        let (mut value, mut interesting, mut hot_pixel) =
+        let (mut value, mut result_type) =
             gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
         assert_eq!(value, 13);
-        assert!(!interesting);
-        assert!(!hot_pixel);
+        assert_eq!(result_type, ResultType::Uninteresting);
 
         // Ditto, other margin.
         gate = [10, 13, 11, 13, 11, 10, 10];
-        (value, interesting, hot_pixel) =
+        (value, result_type) =
             gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
         assert_eq!(value, 13);
-        assert!(!interesting);
-        assert!(!hot_pixel);
+        assert_eq!(result_type, ResultType::Uninteresting);
 
         // Center brighter than both margins.
         gate = [10, 12, 11, 13, 11, 12, 10];
-        (value, interesting, hot_pixel) =
+        (value, result_type) =
             gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
         assert_eq!(value, 13);
-        assert!(interesting);
-        assert!(!hot_pixel);
+        assert_eq!(result_type, ResultType::Candidate);
     }
 
     #[test]
@@ -1126,19 +1118,17 @@ mod tests {
         // based on next surrounding values.
         // In this case, the tie breaks to the left.
         let mut gate: [u8; 7] = [10, 11, 13, 13, 10, 11, 10];
-        let (mut value, mut interesting, mut hot_pixel) =
+        let (mut value, mut result_type) =
             gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
         assert_eq!(value, 13);
-        assert!(!interesting);
-        assert!(!hot_pixel);
+        assert_eq!(result_type, ResultType::Uninteresting);
 
         // Here, the tie breaks to the right (center pixel).
         gate = [10, 11, 13, 13, 11, 11, 10];
-        (value, interesting, hot_pixel) =
+        (value, result_type) =
             gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
         assert_eq!(value, 13);
-        assert!(interesting);
-        assert!(!hot_pixel);
+        assert_eq!(result_type, ResultType::Candidate);
     }
 
     #[test]
@@ -1147,58 +1137,52 @@ mod tests {
         // based on next surrounding values.
         // In this case, the tie breaks to the right.
         let mut gate: [u8; 7] = [10, 11, 11, 13, 13, 11, 10];
-        let (mut value, mut interesting, mut hot_pixel) =
+        let (mut value, mut result_type) =
             gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
         assert_eq!(value, 13);
-        assert!(!interesting);
-        assert!(!hot_pixel);
+        assert_eq!(result_type, ResultType::Uninteresting);
 
         // Here, the tie breaks to the left (center pixel).
         gate = [10, 11, 11, 13, 13, 10, 10];
-        (value, interesting, hot_pixel) =
+        (value, result_type) =
             gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/1);
         assert_eq!(value, 13);
-        assert!(interesting);
-        assert!(!hot_pixel);
+        assert_eq!(result_type, ResultType::Candidate);
     }
 
     #[test]
     fn test_gate_star_1d_hot_pixel() {
         // Neighbors are too dark, so bright center is deemed a hot pixel.
         let mut gate: [u8; 7] = [10, 10, 10, 15, 11, 10, 10];
-        let (mut value, mut interesting, mut hot_pixel) =
+        let (mut value, mut result_type) =
             gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_half=*/2);
         assert_eq!(value, 10);
-        assert!(interesting);
-        assert!(hot_pixel);
+        assert_eq!(result_type, ResultType::HotPixel);
 
         // Neighbors have enough brighness, so bright center is deemed a
         // star candidate.
         gate = [10, 10, 11, 15, 11, 10, 10];
-        (value, interesting, hot_pixel) =
+        (value, result_type) =
             gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/2);
         assert_eq!(value, 15);
-        assert!(interesting);
-        assert!(!hot_pixel);
+        assert_eq!(result_type, ResultType::Candidate);
     }
 
     #[test]
     fn test_gate_star_1d_unequal_border() {
         // Border pixels differ too much, so candidate is rejected.
-        let mut gate: [u8; 7] = [12, 10, 12, 18, 13, 10, 9];
-        let (mut value, mut interesting, mut hot_pixel) =
+        let mut gate: [u8; 7] = [14, 10, 12, 18, 13, 10, 7];
+        let (mut value, mut result_type) =
             gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_half=*/2);
         assert_eq!(value, 18);
-        assert!(!interesting);
-        assert!(!hot_pixel);
+        assert_eq!(result_type, ResultType::Uninteresting);
 
         // Borders are close enough now.
-        gate = [12, 10, 12, 18, 13, 10, 10];
-        (value, interesting, hot_pixel) =
+        gate = [13, 10, 12, 18, 13, 10, 7];
+        (value, result_type) =
             gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_half=*/2);
         assert_eq!(value, 18);
-        assert!(interesting);
-        assert!(!hot_pixel);
+        assert_eq!(result_type, ResultType::Candidate);
     }
 
     #[test]
