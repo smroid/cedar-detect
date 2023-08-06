@@ -5,11 +5,11 @@ use std::time::Instant;
 use clap::Parser;
 use env_logger;
 use image::io::Reader as ImageReader;
-use image::Luma;
+use image::Rgb;
 use imageproc::drawing;
 use log::{info, warn};
 
-use star_gate::get_stars_from_image;
+use star_gate::{estimate_noise_from_image, get_stars_from_image};
 
 /// Example program for running the StarGate star finding algorithm
 /// on test image(s).
@@ -25,7 +25,7 @@ struct Args {
     output: String,
 
     /// Statistical significance factor.
-    #[arg(short, long, default_value_t = 6.0)]
+    #[arg(short, long, default_value_t = 8.0)]
     sigma: f32,
 
     /// Maximum star size.
@@ -79,12 +79,13 @@ fn process_file(file: &str, args: &Args) {
             return;
         },
     };
-    let mut img_u8 = img.into_luma8();
+    let img_u8 = img.to_luma8();
     let (width, height) = img_u8.dimensions();
 
     let star_extraction_start = Instant::now();
-    let (mut stars, _hot_pixel_count, noise_estimate) =
-        get_stars_from_image(&img_u8, args.sigma, args.max_size);
+    let noise_estimate = estimate_noise_from_image(&img_u8);
+    let (mut stars, _hot_pixel_count) =
+        get_stars_from_image(&img_u8, noise_estimate, args.sigma, args.max_size);
     let elapsed = star_extraction_start.elapsed();
     info!("WxH: {}x{}; noise level {}", width, height, noise_estimate);
     info!("Star extraction found {} stars in {:?}", stars.len(), elapsed);
@@ -95,17 +96,18 @@ fn process_file(file: &str, args: &Args) {
     stars.sort_by(|a, b| b.mean_brightness.partial_cmp(&a.mean_brightness).unwrap());
 
     // Scribble marks into the image showing where we found stars.
+    let mut img_color = img.into_rgb8();
     for (index, star) in stars.iter().enumerate() {
         // Stars early in list (bright) get brighter circle.
         let progress = index as f64 / stars.len() as f64;
-        let circle_brightness = 30 + ((1.0 - progress) * 100.0) as u8;
+        let circle_brightness = 100 + ((1.0 - progress) * 155.0) as u8;
         drawing::draw_hollow_circle_mut(
-            &mut img_u8,
+            &mut img_color,
             (star.centroid_x as i32, star.centroid_y as i32),
             4,
-            Luma::<u8>([circle_brightness]));
+            Rgb::<u8>([circle_brightness, 0, 0]));
     }
-    img_u8.save(output_path).unwrap();
+    img_color.save(output_path).unwrap();
     if args.coords {
         let mut coords_str = String::new();
         coords_str.push_str(format!("# WxH {}x{}\n", width, height).as_str());

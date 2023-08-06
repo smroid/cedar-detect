@@ -175,70 +175,6 @@ impl<'a> Iterator for EnumeratePixels<'a> {
     }
 }
 
-// Returns (mean, stddev) for the given image region. Excludes the brightest
-// 2% of pixels.
-fn stats_for_roi(image: &GrayImage, roi: &Rect) -> (/*mean*/f32, /*stddev*/f32) {
-    let mut histogram: [u32; 256] = [0; 256];
-    for (_x, _y, pixel_value) in EnumeratePixels::new(
-        &image, &roi, /*include_interior=*/true) {
-        histogram[pixel_value as usize] += 1;
-    }
-    debug!("Original histogram: {:?}", histogram);
-    // Discard the top 2% of the histogram. We want only background pixels
-    // to contribute to the noise estimate.
-    let keep_count = (roi.width() * roi.height() * 98 / 100) as u32;
-    let mut kept_so_far = 0;
-    let mut first_moment = 0;
-    for h in 0..256 {
-        let bin_count = histogram[h];
-        if kept_so_far + bin_count > keep_count {
-            histogram[h] = keep_count - kept_so_far;
-        }
-        kept_so_far += histogram[h];
-        first_moment += histogram[h] * h as u32;
-    }
-    debug!("De-starred histogram: {:?}", histogram);
-    let mean = first_moment as f32 / keep_count as f32;
-    let mut second_moment: f32 = 0.0;
-    for h in 0..256 {
-        second_moment += histogram[h] as f32 * (h as f32 - mean) * (h as f32 - mean);
-    }
-    let stddev = (second_moment / keep_count as f32).sqrt();
-    (mean, stddev)
-}
-
-// Estimates the RMS noise of the given image. A small portion of the image
-// is processed as follows:
-// 1. The 2% brightest pixels are excluded.
-// 2. The mean of the N remaining pixels is computed, and the standard
-//    deviation is computed in the usual way as
-//      sqrt(sum((pixel-mean)*(pixel-mean))/N)
-//
-// To guard against accidentally sampling a bright part of the image (moon?
-// streetlamp?), we sample a few image regions and choose the darkest one to
-// measure the noise.
-fn estimate_noise_from_image(image: &GrayImage) -> f32 {
-    let noise_start = Instant::now();
-    let (width, height) = image.dimensions();
-    let box_size = cmp::min(30, cmp::min(width, height) / 4);
-    let mut stats_vec = Vec::<(f32, f32)>::new();
-    // Sample three areas across the horizontal midline of the image.
-    stats_vec.push(stats_for_roi(image, &Rect::at(
-        (width*1/4 - box_size/2) as i32, (height/2 - box_size/2) as i32)
-                                 .of_size(box_size, box_size)));
-    stats_vec.push(stats_for_roi(image, &Rect::at(
-        (width*2/4 - box_size/2) as i32, (height/2 - box_size/2) as i32)
-                                 .of_size(box_size, box_size)));
-    stats_vec.push(stats_for_roi(image, &Rect::at(
-        (width*3/4 - box_size/2) as i32, (height/2 - box_size/2) as i32)
-                                 .of_size(box_size, box_size)));
-    // Pick the darkest box.
-    stats_vec.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    let stddev = stats_vec[0].1;
-    debug!("Noise estimate {} found in {:?}", stddev, noise_start.elapsed());
-    stddev
-}
-
 // Given a candidate pixel, examines that pixel within a 7 pixel horizontal
 // context (the candidate pixel plus three neighbors on each side).
 //
@@ -260,7 +196,7 @@ fn estimate_noise_from_image(image: &GrayImage) -> f32 {
 // * The center pixel will be brighter than the sky background by a
 //   statistically significant amount.
 // * The left+right neighbors might not be as bright as the center pixel,
-//   but they will be at least somewhat brighter than the background. This
+//   but they will be brighter than some fraction of the center pixel. This
 //   criterion lets us reject single hot pixels.
 //
 // If a 7 pixel horizontal window satisfies these (and other; see the code)
@@ -312,8 +248,8 @@ fn gate_star_1d(gate: &[u8], sigma_noise_2: i16, sigma_noise_half: i16)
     // background. Do this test first, because it eliminates the vast majority
     // of candidates.
     let est_background_2 = lb + rb;
-    let center_over_background_2 = c + c - est_background_2;
-    if center_over_background_2 < sigma_noise_2 {
+    let center_minus_background_2 = c + c - est_background_2;
+    if center_minus_background_2 < sigma_noise_2 {
         return (c8, ResultType::Uninteresting);
     }
     // Center pixel must be at least as bright as its immediate left/right
@@ -339,10 +275,10 @@ fn gate_star_1d(gate: &[u8], sigma_noise_2: i16, sigma_noise_half: i16)
             return (c8, ResultType::Uninteresting);
         }
     }
-    // Average of l+r must be 0.25 * sigma * estimated noise brighter than the
-    // estimated background.
-    let sum_neighbors_over_background = l + r - est_background_2;
-    if sum_neighbors_over_background < sigma_noise_half {
+    // Average of l+r (minus background) must exceed 0.25 * center (minus
+    // background).
+    let sum_neighbors_minus_background = l + r - est_background_2;
+    if 4 * sum_neighbors_minus_background <= center_minus_background_2 {
         // For ROI processing purposes, replace the hot pixel with its
         // neighbors' value.
         return (((l + r) / 2) as u8, ResultType::HotPixel);
@@ -356,6 +292,7 @@ fn gate_star_1d(gate: &[u8], sigma_noise_2: i16, sigma_noise_half: i16)
         return (c8, ResultType::Uninteresting);
     }
     // We have a candidate star from our 1d analysis!
+    debug!("candidate: {:?}", gate);
     return (c8, ResultType::Candidate);
 }
 
@@ -383,8 +320,10 @@ fn scan_image_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
     let (width, height) = image.dimensions();
     let image_pixels: &Vec<u8> = image.as_raw();
     let mut candidates = Vec::<CandidateFrom1D>::new();
-    let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate) as i16, 1);
-    let sigma_noise_half = cmp::max((0.5 * sigma * noise_estimate) as i16, 1);
+    let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate + 0.5) as i16, 1);
+    let sigma_noise_half = cmp::max((0.5 * sigma * noise_estimate + 0.5) as i16, 1);
+    // TEMPORARY
+    info!("sigma_noise_2 {} sigma_noise_half {}", sigma_noise_2, sigma_noise_half);
     // We'll generally have way fewer than 1 candidate per row.
     candidates.reserve(height as usize);
     for rownum in 0..height {
@@ -560,9 +499,9 @@ pub struct StarDescription {
 // * The perimeter pixels are taken to reflect the local sky background value.
 // * The core is brighter than the sky background by a statistically significant
 //   amount.
-// * The neighbor box might not be as bright as the core, but it will be at
-//   least somewhat brighter than the background. This criterion lets us reject
-//   single hot pixels.
+// * The neighbor box might not be as bright as the core, but it will brighter
+//   than some fraction of the core. This criterion lets us reject single hot
+//   pixels.
 //
 // If a Blob and its surroundings satisfies these (and other; see the code)
 // criteria, a StarDescription is generated by performing centroiding on the
@@ -726,9 +665,9 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
         return None;
     }
     if core_width == 1 && core_height == 1 {
-        // Verify that the neighbor average exceeds background by
-        // 0.25 * sigma * noise.
-        if neighbor_mean - background_est < 0.25 * sigma * noise_estimate {
+        // Verify that the neighbor average (minus background) exceeds 0.25 *
+        // core (minus background).
+        if neighbor_mean - background_est <= 0.25 * (core_mean - background_est) {
             // Hot pixel.
             debug!("Neighbors too weak for blob {:?}", core);
             return None;
@@ -785,12 +724,100 @@ fn create_star_description(image: &GrayImage, neighbors: &Rect, background_est: 
                     num_saturated}
 }
 
+/// Estimates the RMS noise of the given image. A small portion of the image
+/// is processed as follows:
+/// 1. The brightest pixels are excluded.
+/// 2. The standard deviation of the remaining pixels is computed.
+///
+/// To guard against accidentally sampling a bright part of the image (moon?
+/// streetlamp?), we sample a few image regions and choose the darkest one to
+/// measure the noise.
+pub fn estimate_noise_from_image(image: &GrayImage) -> f32 {
+    let noise_start = Instant::now();
+    let (width, height) = image.dimensions();
+    let box_size = cmp::min(30, cmp::min(width, height) / 4);
+    let mut stats_vec = Vec::<(f32, f32)>::new();
+    // Sample three areas across the horizontal midline of the image.
+    stats_vec.push(stats_for_roi(image, &Rect::at(
+        (width*1/4 - box_size/2) as i32, (height/2 - box_size/2) as i32)
+                                 .of_size(box_size, box_size)));
+    stats_vec.push(stats_for_roi(image, &Rect::at(
+        (width*2/4 - box_size/2) as i32, (height/2 - box_size/2) as i32)
+                                 .of_size(box_size, box_size)));
+    stats_vec.push(stats_for_roi(image, &Rect::at(
+        (width*3/4 - box_size/2) as i32, (height/2 - box_size/2) as i32)
+                                 .of_size(box_size, box_size)));
+    // Pick the darkest box by median value.
+    stats_vec.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let stddev = stats_vec[0].1;
+    debug!("Noise estimate {} found in {:?}", stddev, noise_start.elapsed());
+    stddev
+}
+
+// Returns (median, stddev) for the given image region. Excludes bright pixels
+// that are likely to be stars, as we're interested in the median/stddev of the
+// sky background.
+fn stats_for_roi(image: &GrayImage, roi: &Rect) -> (/*median*/f32, /*stddev*/f32) {
+    let mut histogram: [u32; 256] = [0; 256];
+    for (_x, _y, pixel_value) in EnumeratePixels::new(
+        &image, &roi, /*include_interior=*/true) {
+        histogram[pixel_value as usize] += 1;
+    }
+    let (_orig_mean, orig_stddev, orig_median) = stats_for_histogram(&histogram);
+    debug!("Original histogram: {:?}; median {}; stddev {}",
+          histogram, orig_median, orig_stddev);
+    // Any pixel whose value is N * stddev above the median is deemed a star and
+    // kicked out of the histogram.
+    let star_cutoff = (orig_median as f32 + 8.0 as f32 * orig_stddev) as usize;
+    for h in 0_usize..256 {
+        if h >= star_cutoff {
+            histogram[h] = 0;
+        }
+    }
+    debug!("De-starred histogram: {:?}", histogram);
+    let (_mean, stddev, median) = stats_for_histogram(&histogram);
+    (median as f32, stddev)
+}
+
+fn stats_for_histogram(histogram: &[u32; 256])
+                       -> (/*mean*/f32, /*stddev*/f32, /*median*/usize) {
+    let mut count = 0;
+    let mut first_moment = 0;
+    for h in 0..256 {
+        let bin_count = histogram[h];
+        count += bin_count;
+        first_moment += bin_count * h as u32;
+    }
+    if count == 0 {
+        return (0.0, 0.0, 0);
+    }
+    let mean = first_moment as f32 / count as f32;
+    let mut second_moment: f32 = 0.0;
+    let mut sub_count = 0;
+    let mut median = 0;
+    for h in 0..256 {
+        let bin_count = histogram[h];
+        second_moment += bin_count as f32 * (h as f32 - mean) * (h as f32 - mean);
+        if sub_count < count / 2 {
+            sub_count += bin_count;
+            if sub_count >= count / 2 {
+                median = h;
+            }
+        }
+    }
+    let stddev = (second_moment / count as f32).sqrt();
+    (mean, stddev, median)
+}
+
 /// This function runs the StarGate algorithm on the supplied `image`, returning
 /// a [StarDescription] for each detected star.
 ///
 /// # Arguments
 ///   `image` - The image to analyze. The entire image is scanned for stars,
 ///   excluding the three leftmost and three rightmost columns.
+///
+///   `noise_estimate` The noise level of `image`. This is typically the noise
+///   level returned by [estimate_noise_from_image()].
 ///
 ///   `sigma` - Specifies the statistical significance threshold used for
 ///   discriminating stars from background. Given a noise measure N, a pixel's
@@ -810,27 +837,13 @@ fn create_star_description(image: &GrayImage, neighbors: &Rect, background_est: 
 ///
 /// u32: The number of hot pixels seen. See implementation for more information
 /// about hot pixels.
-///
-/// f32: The noise level measured from the image sky background.
-
-// A hot pixel is defined to be a single bright pixel whose immediate neighbors
-// are at sky background level. Normally the hot pixel count is ~constant for a
-// given image detector. get_stars_from_image() returns this value to allow
-// application logic to detect situations where too-sharp focus with large
-// pixels can cause stars to be mis-classified as hot pixels. From an initial
-// defocused state, as focus is improved, the number of detected stars rises,
-// but as we advance into the too-focused regime, the number of detected star
-// candidates will drop as the number of reported hot pixels rises. A rising hot
-// pixel count can be a cue to the application logic that over-focusing is
-// happening.
-pub fn get_stars_from_image(image: &GrayImage, sigma: f32, max_size: u32)
-                            -> (Vec<StarDescription>,
-                                /*hot_pixel_count*/u32, /*noise_estimate*/f32)
+pub fn get_stars_from_image(image: &GrayImage,
+                            noise_estimate: f32, sigma: f32, max_size: u32)
+                            -> (Vec<StarDescription>, /*hot_pixel_count*/u32)
 {
-    let noise_estimate = estimate_noise_from_image(image);
-    // If noise estimate is below 1.0, assume that the image background has been
+    // If noise estimate is below 0.5, assume that the image background has been
     // crushed to black and use a minimum noise value.
-    let corrected_noise_estimate = f32::max(noise_estimate, 1.0);
+    let corrected_noise_estimate = f32::max(noise_estimate, 0.5);
 
     let mut stars = Vec::<StarDescription>::new();
     let (candidates, hot_pixel_count) =
@@ -842,7 +855,17 @@ pub fn get_stars_from_image(image: &GrayImage, sigma: f32, max_size: u32)
             None => ()
         }
     }
-    (stars, hot_pixel_count, noise_estimate)
+    // A hot pixel is defined to be a single bright pixel whose immediate
+    // neighbors are at sky background level. Normally the hot pixel count is
+    // ~constant for a given image detector. get_stars_from_image() returns this
+    // value to allow application logic to detect situations where too-sharp
+    // focus with large pixels can cause stars to be mis-classified as hot
+    // pixels. From an initial defocused state, as focus is improved, the number
+    // of detected stars rises, but as we advance into the too-focused regime,
+    // the number of detected star candidates will drop as the number of
+    // reported hot pixels rises. A rising hot pixel count can be a cue to the
+    // application logic that over-focusing is happening.
+    (stars, hot_pixel_count)
 }
 
 /// Summarizes an image region of interest. The pixel values used are not
@@ -870,7 +893,7 @@ pub struct RegionOfInterestSummary {
 ///   `roi` - Specifies the portion of `image` to be summarized.
 ///
 ///   `noise_estimate` The noise level of `image`. This is typically the noise
-///   level returned by [get_stars_from_image()].
+///   level returned by [estimate_noise_from_image()].
 ///
 ///   `sigma` - Specifies the statistical significance threshold used for
 ///   discriminating hot pixels from background. This can be the same value as
@@ -1033,6 +1056,17 @@ mod tests {
     }
 
     #[test]
+    fn test_stats_for_histogram() {
+        let mut histogram = [0_u32; 256];
+        histogram[10] = 2;
+        histogram[20] = 2;
+        let (mean, stddev, median) = stats_for_histogram(&histogram);
+        assert_eq!(mean, 15.0);
+        assert_eq!(stddev, 5.0);
+        assert_eq!(median, 10);
+    }
+
+    #[test]
     fn test_estimate_noise_from_image() {
         let small_image = gaussian_noise(&GrayImage::new(100, 100),
                                          10.0, 3.0, 42);
@@ -1153,15 +1187,15 @@ mod tests {
     #[test]
     fn test_gate_star_1d_hot_pixel() {
         // Neighbors are too dark, so bright center is deemed a hot pixel.
-        let mut gate: [u8; 7] = [10, 10, 10, 15, 11, 10, 10];
+        let mut gate: [u8; 7] = [10, 10, 10, 15, 12, 10, 10];
         let (mut value, mut result_type) =
             gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_half=*/2);
-        assert_eq!(value, 10);
+        assert_eq!(value, 11);
         assert_eq!(result_type, ResultType::HotPixel);
 
         // Neighbors have enough brighness, so bright center is deemed a
         // star candidate.
-        gate = [10, 10, 11, 15, 11, 10, 10];
+        gate = [10, 10, 12, 15, 12, 10, 10];
         (value, result_type) =
             gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_half=*/2);
         assert_eq!(value, 15);
@@ -1309,9 +1343,9 @@ mod tests {
         let image_7x7 = gray_image!(
         9,  9,  9,  9,  9,  9,  9;
         9, 10, 10, 10, 10, 10,  9;
-        9, 10, 12, 14, 12, 10,  9;
-        9, 10, 14, 30, 14, 10,  9;
-        9, 10, 12, 14, 12, 10,  9;
+        9, 10, 12, 15, 12, 10,  9;
+        9, 10, 15, 30, 15, 10,  9;
+        9, 10, 12, 15, 12, 10,  9;
         9, 10, 10, 10, 10, 10,  9;
         9,  9,  9,  9,  9,  9,  9);
         // Make 1x1 blob, but too far to the left.
@@ -1441,9 +1475,9 @@ mod tests {
         let mut image_7x7 = gray_image!(
         9,  9,  9,  9,  9,  9,  9;
         9, 10, 10, 10, 10, 10,  9;
-       20, 10, 12, 14, 12, 10,  9;
-        9, 10, 14, 30, 14, 10,  9;
-        9, 10, 12, 14, 12, 10,  9;
+       20, 10, 12, 15, 12, 10,  9;
+        9, 10, 15, 30, 15, 10,  9;
+        9, 10, 12, 15, 12, 10,  9;
         9, 10, 10, 10, 10, 10,  9;
         9,  9,  9,  9,  9,  9,  9);
         // Perimeter has an anomalously bright pixel.
@@ -1571,7 +1605,7 @@ mod tests {
         // and right neighbors.
         let image_9x9 = gray_image!(
             9,  9,  9,  7,  80,  9, 9,  9,  9;
-            9,  9,  9,  11, 20, 32, 9,  9,  9);
+            9,  9,  9,  11, 20, 32, 10,  9,  9);
         // ROI is correct distance from left+right edges.
         let roi_summary = summarize_region_of_interest(
             &image_9x9, &roi, 1.0, 5.0);
