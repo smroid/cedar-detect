@@ -12,3 +12,7 @@ env_logger = "0.10.0"
 image = "0.24.6"
 imageproc = "0.23.0"
 log = "0.4.19"
+
+[build-dependencies]
+tonic-build = "0.9"
+prost-build = "0.11.9"

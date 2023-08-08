@@ -9,7 +9,7 @@ use image::Rgb;
 use imageproc::drawing;
 use log::{info, warn};
 
-use star_gate::{estimate_noise_from_image, get_stars_from_image};
+use star_gate::algorithm::{estimate_noise_from_image, get_stars_from_image};
 
 /// Example program for running the StarGate star finding algorithm
 /// on test image(s).
