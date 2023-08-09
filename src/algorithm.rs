@@ -958,9 +958,8 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
             [row_start + gate_leftmost as usize ..
              row_start + gate_rightmost as usize];
         // Slide a 7 pixel gate across the row.
-        let mut center_x = 2;
+        let mut center_x = roi.left();
         for gate in row_pixels.windows(7) {
-            center_x += 1;
             let (pixel_value, _result_type) =
                 gate_star_1d(gate, sigma_noise_2, sigma_noise_1_5);
             histogram[pixel_value as usize] += 1;
@@ -968,6 +967,7 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
                 += pixel_value as u32;
             vertical_projection_sum[(center_x - roi.left()) as usize]
                 += pixel_value as u32;
+            center_x += 1;
         }
     }
     let h_proj: Vec<f32> = horizontal_projection_sum.into_iter().map(
