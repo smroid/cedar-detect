@@ -910,8 +910,8 @@ pub struct RegionOfInterestSummary {
     /// unspecified which one's location is reported here. The application logic
     /// should use `histogram` to adjust exposure to avoid too many peak
     /// (saturated) pixels.
-    peak_x: i32,
-    peak_y: i32,
+    pub peak_x: i32,
+    pub peak_y: i32,
 }
 
 /// Gathers information from a region of interest of an image.
