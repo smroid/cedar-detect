@@ -54,8 +54,8 @@
 //!
 //! ## Star extraction only
 //!
-//! StarGate is designed to identify only stars. It is not a generalized
-//! astronomical source extraction system.
+//! StarGate is designed to identify only star-like spots. It is not a
+//! generalized astronomical source extraction system.
 //!
 //! ## Crowding
 //!
@@ -72,10 +72,10 @@
 //! * StarGate supports only 8-bit grayscale images; color images or images with
 //!   greater bit depth must be converted before calling
 //!   [get_stars_from_image()].
-//! * The imaging exposure time and sensor gain are usually chosen to yield a
-//!   desired number of faint star detections. In so doing, if a bright star is
-//!   overexposed to a degree that it bleeds into too many adjacent pixels,
-//!   StarGate will reject the bright star.
+//! * The imaging exposure time and sensor gain are usually chosen by the caller
+//!   to yield a desired number of faint star detections. In so doing, if a
+//!   bright star is overexposed to a degree that it bleeds into too many
+//!   adjacent pixels, StarGate will reject the bright star.
 //! * Pixel scale and focusing are crucial:
 //!   * If star images are too extended w.r.t. the pixel grid, StarGate will not
 //!     detect the stars. You'll either need to tighten the focus or use pixel
@@ -890,7 +890,8 @@ pub fn get_stars_from_image(image: &GrayImage,
 
 /// Summarizes an image region of interest. The pixel values used are not
 /// background subtracted. Single hot pixels are replaced with interpolated
-/// neighbor values.
+/// neighbor values when locating the peak pixel and when accumulating the
+/// histogram.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct RegionOfInterestSummary {
@@ -898,11 +899,19 @@ pub struct RegionOfInterestSummary {
     pub histogram: [u32; 256],
 
     /// Each element is the mean of a row of the ROI. Size is thus the ROI height.
-    pub horizontal_projection: Vec<f32>,
+    pub horizontal_projection: Vec<f32>,  // TODO: drop this
 
     /// Each element is the mean of a column of the ROI. Size is thus the ROI
     /// width.
-    pub vertical_projection: Vec<f32>,
+    pub vertical_projection: Vec<f32>,  // TODO: drop this
+
+    /// The location (in image coordinates) of the peak pixel (after correcting
+    /// for hot pixels). If there are multiple pixels with the peak value, it is
+    /// unspecified which one's location is reported here. The application logic
+    /// should use `histogram` to adjust exposure to avoid too many peak
+    /// (saturated) pixels.
+    peak_x: i32,
+    peak_y: i32,
 }
 
 /// Gathers information from a region of interest of an image.
@@ -933,6 +942,9 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
                                     -> RegionOfInterestSummary {
     let process_roi_start = Instant::now();
 
+    let mut peak_x = 0;
+    let mut peak_y = 0;
+    let mut peak_val = 0_u8;
     let (width, height) = image.dimensions();
     assert!(roi.bottom() < height as i32);
     // Sliding gate needs to extend past left and right edges of ROI. Make sure
@@ -967,6 +979,11 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
                 += pixel_value as u32;
             vertical_projection_sum[(center_x - roi.left()) as usize]
                 += pixel_value as u32;
+            if pixel_value > peak_val {
+                peak_x = center_x;
+                peak_y = rownum;
+                peak_val = pixel_value;
+            }
             center_x += 1;
         }
     }
@@ -979,6 +996,7 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
     RegionOfInterestSummary{histogram,
                             horizontal_projection: h_proj,
                             vertical_projection: v_proj,
+                            peak_x, peak_y,
     }
 }
 
@@ -1648,6 +1666,9 @@ mod tests {
         assert_eq!(roi_summary.histogram[32], 1);
         assert_eq!(roi_summary.horizontal_projection, [8.0, 21.0]);
         assert_eq!(roi_summary.vertical_projection, [9.0, 14.0, 20.5]);
+        // The hot pixel is not the peak.
+        assert_eq!(roi_summary.peak_x, 5);
+        assert_eq!(roi_summary.peak_y, 1);
     }
 
 }  // mod tests.
