@@ -647,6 +647,18 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
     let background_est = perimeter_sum as f32 / perimeter_count as f32;
     debug!("background: {} for blob {:?}", background_est, core);
 
+    // Compute a second noise estimate from the perimeter. If we're in clutter
+    // such as an illuminated foreground object, this noise estimate will be
+    // high, suppressing spurious "star" detections.
+    let mut perimeter_dev_2: f32 = 0.0;
+    for (_x, _y, pixel_value) in EnumeratePixels::new(
+        &image, &perimeter, /*include_interior=*/false) {
+        perimeter_dev_2 += (pixel_value as f32 - background_est) *
+            (pixel_value as f32 - background_est);
+    }
+    let perimeter_stddev = (perimeter_dev_2 / perimeter_count as f32).sqrt();
+    let max_noise_estimate = f32::max(noise_estimate, perimeter_stddev);
+
     // We require the perimeter pixels to be ~uniformly dark. See if any
     // perimeter pixel is too bright compared to the darkest perimeter
     // pixel.
@@ -658,7 +670,7 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
     }
 
     // Verify that core average exceeds background by sigma * noise.
-    if core_mean - background_est < sigma * noise_estimate {
+    if core_mean - background_est < sigma * max_noise_estimate {
         debug!("Core too weak for blob {:?}", core);
         return None;
     }
@@ -671,6 +683,7 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
             return None;
         }
     }
+
     // Star passes all of the 2d gates!
     Some(create_star_description(image, &neighbors, background_est))
 }
