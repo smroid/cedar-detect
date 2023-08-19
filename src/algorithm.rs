@@ -941,7 +941,7 @@ fn stats_for_histogram(histogram: &[u32; 256])
 ///
 ///   `detect_hot_pixels` - Determines if hot pixel detection/replacement is
 ///   applied. If true, hot pixel replacement is done prior to star detection
-///   and (if selected) binning.
+///   and (if requested) binning.
 ///
 ///   `create_binned_image` - Determines if a 2x2 binning of `image` should be
 ///   returned.
@@ -987,6 +987,31 @@ pub fn get_stars_from_image(image: &GrayImage,
     // reported hot pixels rises. A rising hot pixel count can be a cue to the
     // application logic that over-focusing is happening.
     (stars, hot_pixel_count, binned_image)
+}
+
+/// This function creates a 2x2 binned image. Hot pixels are detected and
+/// substituted prior to the binning.
+///
+/// # Arguments
+///   `image` - The image to bin 2x2. If the width is odd, the last column
+///   does not contibute to the result; if the height is odd the last row
+///   does not contribute.
+///
+///   `noise_estimate` The noise level of `image`. This is typically the noise
+///   level returned by [estimate_noise_from_image()]. Used when detecting hot
+///   pixels.
+///
+///   `sigma` - Specifies the statistical significance threshold used for
+///   discriminating hot pixels. Used when detecting hot pixels.
+pub fn bin_image(image: &GrayImage, noise_estimate: f32, sigma: f32) -> GrayImage {
+    // If noise estimate is below 0.5, assume that the image background has been
+    // crushed to black; use a minimum noise value.
+    let corrected_noise_estimate = f32::max(noise_estimate, 0.5);
+    let (_candidates, _hot_pixel_count, binned_image) =
+        scan_image_for_candidates(image, corrected_noise_estimate, sigma,
+                                  /*detect_hot_pixels=*/true,
+                                  /*create_binned_image=*/true);
+    binned_image.unwrap()
 }
 
 /// Summarizes an image region of interest. The pixel values used are not
