@@ -998,11 +998,10 @@ pub fn get_stars_from_image(image: &GrayImage,
 ///   does not contribute.
 ///
 ///   `noise_estimate` The noise level of `image`. This is typically the noise
-///   level returned by [estimate_noise_from_image()]. Used when detecting hot
-///   pixels.
+///   level returned by [estimate_noise_from_image()].
 ///
 ///   `sigma` - Specifies the statistical significance threshold used for
-///   discriminating hot pixels. Used when detecting hot pixels.
+///   discriminating hot pixels.
 pub fn bin_image(image: &GrayImage, noise_estimate: f32, sigma: f32) -> GrayImage {
     // If noise estimate is below 0.5, assume that the image background has been
     // crushed to black; use a minimum noise value.
