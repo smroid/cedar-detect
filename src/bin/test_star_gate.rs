@@ -84,8 +84,8 @@ fn process_file(file: &str, args: &Args) {
 
     let star_extraction_start = Instant::now();
     let noise_estimate = estimate_noise_from_image(&img_u8);
-    let (mut stars, _hot_pixel_count) =
-        get_stars_from_image(&img_u8, noise_estimate, args.sigma, args.max_size);
+    let (mut stars, _hot_pixel_count, _binned_image) =
+        get_stars_from_image(&img_u8, noise_estimate, args.sigma, args.max_size, true);
     let elapsed = star_extraction_start.elapsed();
     info!("WxH: {}x{}; noise level {}", width, height, noise_estimate);
     info!("Star extraction found {} stars in {:?}", stars.len(), elapsed);

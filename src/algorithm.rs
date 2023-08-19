@@ -311,7 +311,7 @@ struct CandidateFrom1D {
 // Applies gate_star_1d() at all pixel positions of the image (excluding the few
 // leftmost and rightmost columns) to identify star candidates for futher
 // screening.
-// `image` Image to be scanned.
+// `image` Image to be scanned. Width and height must be even.
 // `noise_estimate` The noise level of the image. See estimate_noise_from_image().
 // `sigma` Specifies the multiple of the noise level by which a pixel must exceed
 //     the background to be considered a star candidate, in addition to
@@ -319,47 +319,107 @@ struct CandidateFrom1D {
 // Returns:
 // Vec<CandidateFrom1D>: the identifed star candidates, in raster scan order.
 // u32: count of hot pixels detected.
-fn scan_image_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32)
-                       -> (Vec<CandidateFrom1D>, /*hot_pixel_count*/u32) {
+// Option<GrayImage>: if `create_binned_image` is true, the 2x2 binning of `image`
+//   is returned. TODO: no need to make it optional? Cheap enough?
+//
+// TODO: `detect_hot_pixels` argument.
+fn scan_image_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32,
+                             create_binned_image: bool)
+                             -> (Vec<CandidateFrom1D>,
+                                 /*hot_pixel_count*/u32,
+                                 Option<GrayImage>,)
+{
     let row_scan_start = Instant::now();
     let mut hot_pixel_count = 0_u32;
-    let (width, height) = image.dimensions();
+    let width = image.dimensions().0 as usize;
+    let height = image.dimensions().1 as usize;
+    assert!(width % 2 == 0);
+    assert!(height % 2 == 0);
     let image_pixels: &Vec<u8> = image.as_raw();
     let mut candidates = Vec::<CandidateFrom1D>::new();
     let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate + 0.5) as i16, 2);
     let sigma_noise_1_5 = cmp::max((1.5 * sigma * noise_estimate + 0.5) as i16, 1);
+
+    // Allocate uninitialized storage to receive the 2x2 binned image data.
+    let (binned_width, binned_height) = (width / 2, height / 2);
+    let num_binned_pixels = binned_width * binned_height;
+    let mut binned_image_data = Vec::<u8>::new();
+    if create_binned_image {
+        binned_image_data.reserve(num_binned_pixels as usize);
+        unsafe { binned_image_data.set_len(num_binned_pixels) }
+    }
+    // Allocate accumulator row for binning.
+    let mut binned_row = Vec::<u16>::new();
+    binned_row.resize(binned_width, 2);
+    let binned_slice: &mut[u16] = &mut binned_row[0..binned_width];
+
     // We'll generally have way fewer than 1 candidate per row.
-    candidates.reserve(height as usize);
+    candidates.reserve(height);
     for rownum in 0..height {
         // Get the slice of image_pixels corresponding to this row.
         let row_pixels: &[u8] = &image_pixels.as_slice()
-            [(rownum * width) as usize .. ((rownum+1) * width) as usize];
+            [rownum * width .. (rownum+1) * width];
         // Slide a 7 pixel gate across the row.
-        let mut center_x = 2_u32;
-        for gate in row_pixels.windows(7) {
-            center_x += 1;
-            let (_pixel_value, result_type) =
-                gate_star_1d(gate, sigma_noise_2, sigma_noise_1_5,
-                             /*detect_hot_pixels=*/true);
-            match result_type {
-                ResultType::Uninteresting => (),
-                ResultType::Candidate => {
-                    debug!("Candidate at row {} col {}; gate {:?}",
-                           rownum, center_x, gate);
-                    candidates.push(CandidateFrom1D{x: center_x as i32,
-                                                    y: rownum as i32});
-                },
-                ResultType::HotPixel => {
-                    debug!("Hot pixel at row {} col {}; gate {:?}",
-                           rownum, center_x, gate);
-                    hot_pixel_count += 1;
-                },
+        let mut center_x = 2_usize;
+        if create_binned_image {
+            binned_slice[0] += row_pixels[0] as u16;
+            binned_slice[0] += row_pixels[1] as u16;
+            binned_slice[1] += row_pixels[2] as u16;
+            for gate in row_pixels.windows(7) {
+                center_x += 1;
+                let (pixel_value, result_type) =
+                    gate_star_1d(gate, sigma_noise_2, sigma_noise_1_5,
+                                 /*detect_hot_pixels=*/true);
+                binned_slice[center_x / 2] += pixel_value as u16;
+                match result_type {
+                    ResultType::Uninteresting => (),
+                    ResultType::Candidate => {
+                        candidates.push(CandidateFrom1D{x: center_x as i32,
+                                                        y: rownum as i32});
+                    },
+                    ResultType::HotPixel => { hot_pixel_count += 1; },
+                }
+            }
+            binned_slice[binned_width - 2] += row_pixels[width - 3] as u16;
+            binned_slice[binned_width - 1] += row_pixels[width - 2] as u16;
+            binned_slice[binned_width - 1] += row_pixels[width - 1] as u16;
+            if rownum % 1 != 0 {
+                let binned_rownum = rownum / 2;
+                let binned_image_row: &mut[u8] = &mut binned_image_data.as_mut_slice()
+                    [binned_rownum * binned_width .. (binned_rownum+1) * binned_width];
+                for x in 0..binned_width {
+                    binned_image_row[x] = (binned_slice[x] / 4) as u8;
+                    binned_slice[x] = 2;
+                }
+            }
+        } else {
+            for gate in row_pixels.windows(7) {
+                center_x += 1;
+                let (_pixel_value, result_type) =
+                    gate_star_1d(gate, sigma_noise_2, sigma_noise_1_5,
+                                 /*detect_hot_pixels=*/true);
+                match result_type {
+                    ResultType::Uninteresting => (),
+                    ResultType::Candidate => {
+                        candidates.push(CandidateFrom1D{x: center_x as i32,
+                                                        y: rownum as i32});
+                    },
+                    ResultType::HotPixel => { hot_pixel_count += 1; },
+                }
             }
         }
     }
     info!("Image scan found {} candidates and {} hot pixels in {:?}",
           candidates.len(), hot_pixel_count, row_scan_start.elapsed());
-    (candidates, hot_pixel_count)
+    if create_binned_image {
+        (candidates,
+         hot_pixel_count,
+         Some(GrayImage::from_raw(binned_width as u32, binned_height as u32,
+                                  binned_image_data).unwrap()),
+        )
+    } else {
+        (candidates, hot_pixel_count, None)
+    }
 }
 
 #[derive(Debug)]
@@ -854,7 +914,8 @@ fn stats_for_histogram(histogram: &[u32; 256])
 ///
 /// # Arguments
 ///   `image` - The image to analyze. The entire image is scanned for stars,
-///   excluding the three leftmost and three rightmost columns.
+///   excluding the three leftmost and three rightmost columns. Width and height
+///   must be even.
 ///
 ///   `noise_estimate` The noise level of `image`. This is typically the noise
 ///   level returned by [estimate_noise_from_image()].
@@ -872,22 +933,32 @@ fn stats_for_histogram(histogram: &[u32; 256])
 ///   bright stars that "bleed" to many surrounding pixels. Typical `max_size`
 ///   values: 3-5.
 ///
+///   `create_binned_image` - Determines if a 2x2 binning of `image` should be
+///   returned.
+///
 /// # Returns
 /// Vec<[StarDescription]>, in unspecified order.
 ///
 /// u32: The number of hot pixels seen. See implementation for more information
 /// about hot pixels.
+///
+/// Option<GrayImage>: if `create_binned_image` is true, the 2x2 binning of `image`
+///   is returned.
 pub fn get_stars_from_image(image: &GrayImage,
-                            noise_estimate: f32, sigma: f32, max_size: u32)
-                            -> (Vec<StarDescription>, /*hot_pixel_count*/u32)
+                            noise_estimate: f32, sigma: f32, max_size: u32,
+                            create_binned_image: bool)
+                            -> (Vec<StarDescription>,
+                                /*hot_pixel_count*/u32,
+                                Option<GrayImage>)
 {
     // If noise estimate is below 0.5, assume that the image background has been
     // crushed to black; use a minimum noise value.
     let corrected_noise_estimate = f32::max(noise_estimate, 0.5);
 
     let mut stars = Vec::<StarDescription>::new();
-    let (candidates, hot_pixel_count) =
-        scan_image_for_candidates(image, corrected_noise_estimate, sigma);
+    let (candidates, hot_pixel_count, binned_image) =
+        scan_image_for_candidates(image, corrected_noise_estimate, sigma,
+        create_binned_image);
     for blob in form_blobs_from_candidates(candidates) {
         match gate_star_2d(&blob, image, corrected_noise_estimate,
                            sigma, max_size, max_size) {
@@ -905,7 +976,7 @@ pub fn get_stars_from_image(image: &GrayImage,
     // the number of detected star candidates will drop as the number of
     // reported hot pixels rises. A rising hot pixel count can be a cue to the
     // application logic that over-focusing is happening.
-    (stars, hot_pixel_count)
+    (stars, hot_pixel_count, binned_image)
 }
 
 /// Summarizes an image region of interest. The pixel values used are not
