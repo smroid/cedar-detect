@@ -46,13 +46,18 @@ To try it out:
 
 0. Install Python and all needed dependencies.
 1. Install Tetra3.
-2. With python/ as your current directory, execute:<br>
-   python -m grpc_tools.protoc -I../src/proto --python_out=. --pyi_out=. \
-     --grpc_python_out=. ../src/proto/star_gate.proto
-3. Run the stargate gRPC server in background:<br>
-   cargo run --release --bin stargate-server &
-4. Run the python program:<br>
-   python stargate_client.py
+2. With python/ as your current directory, execute:
+
+        python -m grpc_tools.protoc -I../src/proto --python_out=. --pyi_out=. \\
+        --grpc_python_out=. ../src/proto/star_gate.proto
+
+3. Run the stargate gRPC server in background:
+
+        cargo run --release --bin stargate-server &
+
+4. Run the python program:
+
+        python stargate_client.py
 
 ## Other languages
 
