@@ -35,7 +35,7 @@ There is (currently) no option to link StarGate with Python. Instead, a
 microservice invocation API is provided using gRPC.
 
 The src/bin/stargate_server.rs binary runs as a gRPC service, providing a simple
-image==>centroids RPC interface. See src/proto/star_gate.proto for the gRPC
+image &rarr; centroids RPC interface. See src/proto/star_gate.proto for the gRPC
 service definition.
 
 In python/stargate_client.py, a simple Python script demonstrates how to invoke
