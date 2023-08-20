@@ -118,7 +118,7 @@ use std::time::Instant;
 
 use image::GrayImage;
 use imageproc::rect::Rect;
-use log::{debug, info};
+use log::{debug};
 
 // An iterator over the pixels of a region of interest. Yields pixels in raster
 // scan order.
@@ -415,7 +415,7 @@ fn scan_image_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32,
             }
         }
     }
-    info!("Image scan found {} candidates and {} hot pixels in {:?}",
+    debug!("Image scan found {} candidates and {} hot pixels in {:?}",
           candidates.len(), hot_pixel_count, row_scan_start.elapsed());
     if create_binned_image {
         (candidates,
@@ -518,7 +518,7 @@ fn form_blobs_from_candidates(candidates: Vec<CandidateFrom1D>)
             non_empty_blobs.push(blob);
         }
     }
-    info!("Found {} blobs in {:?}", non_empty_blobs.len(), blobs_start.elapsed());
+    debug!("Found {} blobs in {:?}", non_empty_blobs.len(), blobs_start.elapsed());
     non_empty_blobs
 }
 

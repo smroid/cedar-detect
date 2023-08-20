@@ -22,3 +22,7 @@ Cargo.lock
 *.bmp
 *.jpg
 *~
+*.pyi
+*pb2.py
+*pb2_grpc.py
+__pycache__

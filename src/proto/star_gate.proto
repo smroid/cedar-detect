@@ -30,11 +30,11 @@ message CentroidsRequest {
   // eliminated.
   bool return_binned = 4;
 
-  // If true, a 2x2 binning of `input_image` is processed to identify star
-  // candidates instead of using the full-res `input_image`. This is useful for
-  // situations where the `input_image` pixels are greatly oversampling the
-  // spatial resolution, in other words stars are not tightly focused to ~2
-  // pixels FWHM.
+  // If true, a 2x2 binning of `input_image` is created internaly to identify
+  // star candidates instead of using the full-res `input_image`. This is useful
+  // for situations where the `input_image` pixels are greatly oversampling the
+  // spatial resolution, or a poor quality lens is used; in other words stars
+  // are not tightly focused to ~2 pixels FWHM.
   // Note that centroid positions are reported in full-res `input_image`
   // coordinates even if the binned image is the source of candidates.
   bool use_binned_for_star_candidates = 5;
