@@ -1,23 +1,17 @@
+use std::ffi::CString;
 use std::net::SocketAddr;
 use std::time::Instant;
 
 use clap::Parser;
 use env_logger;
 use image::GrayImage;
+use libc::{close, mmap, shm_open, c_char, O_RDONLY, PROT_READ, MAP_SHARED};
 use log::{info};
 
 use ::star_gate::algorithm::{bin_image, estimate_noise_from_image, get_stars_from_image};
 use crate::star_gate::star_gate_server::{StarGate, StarGateServer};
 
 use tonic_web::GrpcWebLayer;
-
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about=None)]
-struct Args {
-    /// Port that the gRPC server listens on.
-    #[arg(short, long, default_value_t = 50051)]
-    port: u16,
-}
 
 pub mod star_gate {
     // The string specified here must match the proto package name.
@@ -43,19 +37,59 @@ impl StarGate for MyStarGate {
         }
         let input_image = req.input_image.unwrap();
 
-        let mut req_image = GrayImage::from_raw(input_image.width as u32,
+        let req_image;
+        let mut fd = 0;
+        let using_shmem = input_image.shmem_name.is_some();
+        if using_shmem {
+            let num_pixels = (input_image.width * input_image.height) as usize;
+            let name = CString::new(input_image.shmem_name.unwrap()).unwrap();
+            unsafe {
+                fd = shm_open(name.as_ptr(), O_RDONLY, 0);
+                let addr = mmap(std::ptr::null_mut(), num_pixels, PROT_READ,
+                                MAP_SHARED, fd, 0);
+                // We are violating the invariant that 'addr' must have been
+                // allocated using the global allocator. This is OK because our
+                // usage of the vector (within GrayImage) is read-only, so there
+                // won't be any reallocations. Note that we call
+                // vec_shmem.leak() below, so the vector won't try to deallocate
+                // 'addr'.
+                let vec_shmem = Vec::<u8>::from_raw_parts(addr as *mut c_char,
+                                                          num_pixels, num_pixels);
+                req_image = GrayImage::from_raw(input_image.width as u32,
                                                 input_image.height as u32,
-                                                input_image.image_data).unwrap();
-        let mut noise_estimate = estimate_noise_from_image(&req_image);
-        if req.use_binned_for_star_candidates {
-            req_image = bin_image(&req_image, noise_estimate, req.sigma);
-            noise_estimate = estimate_noise_from_image(&req_image);
+                                                vec_shmem).unwrap();
+            }
+        } else {
+            req_image = GrayImage::from_raw(input_image.width as u32,
+                                            input_image.height as u32,
+                                            input_image.image_data).unwrap();
         }
-        let (mut stars, hot_pixel_count, binned_image) =
-            get_stars_from_image(
-                &req_image, noise_estimate, req.sigma, req.max_size as u32,
-                /*detect_hot_pixels=*/!req.use_binned_for_star_candidates,
-                /*create_binned_image=*/req.return_binned);
+
+        let noise_estimate = estimate_noise_from_image(&req_image);
+        let mut binned_image: Option<GrayImage> = None;
+        let (mut stars, hot_pixel_count);
+        if req.use_binned_for_star_candidates {
+            let local_binned_image = bin_image(&req_image, noise_estimate, req.sigma);
+            let binned_noise_estimate = estimate_noise_from_image(&local_binned_image);
+            (stars, hot_pixel_count, _) =
+                get_stars_from_image(&local_binned_image, binned_noise_estimate,
+                                     req.sigma, req.max_size as u32,
+                                     /*detect_hot_pixels=*/false,
+                                     /*create_binned_image=*/false);
+        } else {
+            (stars, hot_pixel_count, binned_image) =
+                get_stars_from_image(&req_image, noise_estimate,
+                                     req.sigma, req.max_size as u32,
+                                     /*detect_hot_pixels=*/true,
+                                     /*create_binned_image=*/req.return_binned);
+        }
+        if using_shmem {
+            // Deconstruct req_image that is referencing shared memory.
+            let vec_shmem = req_image.into_raw();
+            vec_shmem.leak();  // vec_shmem no longer "owns" the shared memory.
+            unsafe { close(fd); }
+        }
+
         // Sort by brightness estimate, brightest first.
         stars.sort_by(|a, b| b.mean_brightness.partial_cmp(&a.mean_brightness).unwrap());
 
@@ -84,6 +118,7 @@ impl StarGate for MyStarGate {
                     width: bimg.width() as i32,
                     height: bimg.height() as i32,
                     image_data: bimg.into_raw(),
+                    shmem_name: None,
                 })
             } else {
                 None
@@ -93,6 +128,14 @@ impl StarGate for MyStarGate {
         };
         Ok(tonic::Response::new(response))
     }
+}
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about=None)]
+struct Args {
+    /// Port that the gRPC server listens on.
+    #[arg(short, long, default_value_t = 50051)]
+    port: u16,
 }
 
 #[tokio::main]

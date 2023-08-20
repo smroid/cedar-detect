@@ -65,10 +65,13 @@ message Image {
   int32 width = 1;
   int32 height = 2;
 
-  // Row major format, uint8 grayscale pixels.
+  // Row major format, uint8 grayscale pixels. Not populated if `shmem_name` is
+  // present.
   bytes image_data = 3;
 
-  // TODO: option to convey image data via shared memory (mmap()ed file).
+  // If present, identifies a shm_open() shared memory object in which the
+  // image data has been written.
+  optional string shmem_name = 4;
 }
 
 // Summarizes a star-like spot found by the StarGate algorithm.
