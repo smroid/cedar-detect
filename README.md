@@ -48,17 +48,13 @@ To try it out:
 1. Install Tetra3.
 2. With python/ as your current directory, execute:
 
-        python -m grpc_tools.protoc -I../src/proto --python_out=. --pyi_out=. \\
-        --grpc_python_out=. ../src/proto/star_gate.proto
-
+        python -m grpc_tools.protoc -I../src/proto --python_out=. --pyi_out=. --grpc_python_out=. ../src/proto/star_gate.proto
 3. Run the stargate gRPC server in background:
 
         cargo run --release --bin stargate-server &
-
 4. Run the python program:
 
         python stargate_client.py
-
 ## Other languages
 
 Any language that can be a gRPC client should be able to invoke StarGate.
