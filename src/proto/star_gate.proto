@@ -28,7 +28,6 @@ message CentroidsRequest {
   // If true, in addition to identifying star candidates, the StarGate algorithm
   // should also return a 2x2 binning of `input_image`, with hot pixels
   // eliminated.
-  // Not yet implemented.
   bool return_binned = 4;
 
   // If true, a 2x2 binning of `input_image` is processed to identify star
@@ -38,7 +37,6 @@ message CentroidsRequest {
   // pixels FWHM.
   // Note that centroid positions are reported in full-res `input_image`
   // coordinates even if the binned image is the source of candidates.
-  // Not yet implemented.
   bool use_binned_for_star_candidates = 5;
 }
 
@@ -67,7 +65,7 @@ message Image {
   int32 width = 1;
   int32 height = 2;
 
-  // Row major format, int8 grayscale pixels.
+  // Row major format, uint8 grayscale pixels.
   bytes image_data = 3;
 
   // TODO: option to convey image data via shared memory (mmap()ed file).
