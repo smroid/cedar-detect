@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use env_logger;
@@ -8,7 +8,7 @@ use log::{info, warn};
 use ::star_gate::algorithm::{bin_image, estimate_noise_from_image, get_stars_from_image};
 
 use crate::star_gate::star_gate_server::{StarGate, StarGateServer};
-use crate::star_gate::{CentroidsRequest, CentroidsResult};
+use crate::star_gate::{CentroidsRequest, CentroidsResult, StarCentroid};
 
 use tonic_web::GrpcWebLayer;
 
@@ -35,6 +35,17 @@ impl StarGate for MyStarGate {
         &self, request: tonic::Request<CentroidsRequest>)
         -> Result<tonic::Response<CentroidsResult>, tonic::Status>
     {
+        let req: CentroidsRequest = request.into_inner();
+
+        let candidates = Vec::<StarCentroid>::new();
+        let response = star_gate::CentroidsResult{
+            noise_estimate: 0.0,
+            hot_pixel_count: 0,
+            star_candidates: candidates,
+            binned_image: None,
+            algorithm_time: Some(prost_types::Duration::try_from(Duration::from_secs(0)).unwrap()),
+        };
+        Ok(tonic::Response::new(response))
     }
 }
 
@@ -49,6 +60,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("StarGateServer listening on {}", addr);
 
     tonic::transport::Server::builder()
+        .accept_http1(true)
+        .layer(GrpcWebLayer::new())
         .add_service(StarGateServer::new(MyStarGate{}))
         .serve(addr)
         .await?;
