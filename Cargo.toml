@@ -5,7 +5,7 @@ edition = "2021"
 
 [[bin]] # Bin to run the StarGate gRPC server.
 name = "stargate-server"
-path = "src/bin/grpc_server.rs"
+path = "src/bin/stargate_server.rs"
 
 [dependencies]
 approx = "0.5.1"
