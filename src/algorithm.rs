@@ -523,7 +523,7 @@ fn form_blobs_from_candidates(candidates: Vec<CandidateFrom1D>)
 }
 
 /// Summarizes a star-like spot found by [get_stars_from_image()].
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub struct StarDescription {
     /// Location of star centroid in image coordinates. (0.5, 0.5) corresponds
     /// to the center of the image's upper left pixel.
@@ -759,24 +759,23 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
     }
 
     // Star passes all of the 2d gates!
-    Some(create_star_description(image, &neighbors, background_est))
+    Some(create_star_description(image, &margin, background_est))
 }
 
 // Called when gate_star_2d() determines that a Blob is detected as containing a
 // star.
-// neighbors: specifies the region encompassing the Blob plus a one pixel
-//     surround.
+// bounding_box: specifies the region encompassing the Blob plus some surround.
 // background_est: the average value of the "perimeter" pixels around the Blob.
-fn create_star_description(image: &GrayImage, neighbors: &Rect, background_est: f32)
+fn create_star_description(image: &GrayImage, bounding_box: &Rect, background_est: f32)
                            -> StarDescription {
-    // Process the interior pixels (core plus immediate neighbors) to
-    // obtain moments. Also note the count of saturated pixels.
+    // Process the interior pixels (core plus some neighbors) to obtain moments.
+    // Also note the count of saturated pixels.
     let mut num_saturated = 0;
     let mut m0: f32 = 0.0;
     let mut m1x: f32 = 0.0;
     let mut m1y: f32 = 0.0;
     for (x, y, pixel_value) in EnumeratePixels::new(
-        &image, &neighbors, /*include_interior=*/true) {
+        &image, &bounding_box, /*include_interior=*/true) {
         if pixel_value == 255 {
             num_saturated += 1;
         }
@@ -792,7 +791,7 @@ fn create_star_description(image: &GrayImage, neighbors: &Rect, background_est: 
     let mut m2x_c: f32 = 0.0;
     let mut m2y_c: f32 = 0.0;
     for (x, y, pixel_value) in EnumeratePixels::new(
-        &image, &neighbors, /*include_interior=*/true) {
+        &image, &bounding_box, /*include_interior=*/true) {
         let val_minus_bkg = pixel_value as f32 - background_est;
         m2x_c += (x as f32 - centroid_x) * (x as f32 - centroid_x) * val_minus_bkg;
         m2y_c += (y as f32 - centroid_y) * (y as f32 - centroid_y) * val_minus_bkg;
@@ -804,7 +803,7 @@ fn create_star_description(image: &GrayImage, neighbors: &Rect, background_est: 
                     stddev_x: variance_x.sqrt() as f32,
                     stddev_y: variance_y.sqrt() as f32,
                     mean_brightness:
-                    m0 / (neighbors.width() * neighbors.height()) as f32,
+                    m0 / (bounding_box.width() * bounding_box.height()) as f32,
                     background: background_est,
                     num_saturated}
 }
