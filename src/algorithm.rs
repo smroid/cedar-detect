@@ -167,7 +167,7 @@ impl<'a> Iterator for EnumeratePixels<'a> {
                 self.cur_x += 1;
             } else {
                 // Exclude interior.
-                assert!(self.cur_x == self.roi.left());
+                assert_eq!(self.cur_x, self.roi.left());
                 self.cur_x = self.roi.right();
             }
         }
@@ -495,16 +495,19 @@ fn form_blobs_from_candidates(candidates: Vec<CandidateFrom1D>)
                     let donor_blob = blobs.get_mut(&donor_blob_id).unwrap();
                     if !donor_blob.candidates.is_empty() {
                         donated_candidates = donor_blob.candidates.drain(..).collect();
-                        assert!(donor_blob.recipient_blob == -1);
+                        assert_eq!(donor_blob.recipient_blob, -1);
                         donor_blob.recipient_blob = recipient_blob_id;
+                        let recipient_blob = &mut blobs.get_mut(&recipient_blob_id).unwrap();
+                        recipient_blob.candidates.append(&mut donated_candidates);
                         break;
                     }
-                    // This blob got merged to another blob.
-                    assert!(donor_blob.recipient_blob != -1);
+                    // donor_blob's candidates got merged to another blob.
+                    assert_ne!(donor_blob.recipient_blob, -1);
+                    if donor_blob.recipient_blob == recipient_blob_id {
+                        break;  // Already merged it.
+                    }
                     donor_blob_id = donor_blob.recipient_blob;
                 }
-                let recipient_blob = &mut blobs.get_mut(&recipient_blob_id).unwrap();
-                recipient_blob.candidates.append(&mut donated_candidates);
             }
         }
     }
@@ -513,7 +516,7 @@ fn form_blobs_from_candidates(candidates: Vec<CandidateFrom1D>)
     let mut non_empty_blobs = Vec::<Blob>::new();
     for (_id, blob) in blobs {
         if !blob.candidates.is_empty() {
-            assert!(blob.recipient_blob == -1);
+            assert_eq!(blob.recipient_blob, -1);
             debug!("got blob {:?}", blob);
             non_empty_blobs.push(blob);
         }
