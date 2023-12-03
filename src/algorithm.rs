@@ -769,6 +769,8 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
 // star.
 // bounding_box: specifies the region encompassing the Blob plus some surround.
 // background_est: the average value of the "perimeter" pixels around the Blob.
+// TODO(smr): when doing star detection on a 2x2 binned image, arrange to do
+// centroiding on original resolution image.
 fn create_star_description(image: &GrayImage, bounding_box: &Rect, background_est: f32)
                            -> StarDescription {
     // Process the interior pixels (core plus some neighbors) to obtain moments.
@@ -1004,15 +1006,21 @@ pub fn get_stars_from_image(image: &GrayImage,
 ///
 ///   `sigma` - Specifies the statistical significance threshold used for
 ///   discriminating hot pixels.
-pub fn bin_image(image: &GrayImage, noise_estimate: f32, sigma: f32) -> GrayImage {
+///
+/// # Returns
+/// GrayImage: the 2x2 binning of `image`.
+///
+/// u32: The number of hot pixels seen.
+pub fn bin_image(image: &GrayImage, noise_estimate: f32, sigma: f32)
+                 -> (GrayImage, u32) {
     // If noise estimate is below 0.5, assume that the image background has been
     // crushed to black; use a minimum noise value.
     let corrected_noise_estimate = f32::max(noise_estimate, 0.5);
-    let (_candidates, _hot_pixel_count, binned_image) =
+    let (_candidates, hot_pixel_count, binned_image) =
         scan_image_for_candidates(image, corrected_noise_estimate, sigma,
                                   /*detect_hot_pixels=*/true,
                                   /*create_binned_image=*/true);
-    binned_image.unwrap()
+    (binned_image.unwrap(), hot_pixel_count)
 }
 
 /// Summarizes an image region of interest. The pixel values used are not

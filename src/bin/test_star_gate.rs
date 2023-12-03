@@ -89,7 +89,7 @@ fn process_file(file: &str, args: &Args) {
     let star_extraction_start = Instant::now();
     let mut noise_estimate = estimate_noise_from_image(&img_u8);
     if args.binning {
-        img_u8 = bin_image(&img_u8, noise_estimate, args.sigma);
+        (img_u8, _) = bin_image(&img_u8, noise_estimate, args.sigma);
         noise_estimate = estimate_noise_from_image(&img_u8);
     }
     let (mut stars, _hot_pixel_count, _binned_image) =
