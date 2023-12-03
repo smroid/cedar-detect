@@ -1020,17 +1020,9 @@ pub fn bin_image(image: &GrayImage, noise_estimate: f32, sigma: f32) -> GrayImag
 /// neighbor values when locating the peak pixel and when accumulating the
 /// histogram.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct RegionOfInterestSummary {
     /// Histogram of pixel values in the ROI.
     pub histogram: [u32; 256],
-
-    /// Each element is the mean of a row of the ROI. Size is thus the ROI height.
-    pub horizontal_projection: Vec<f32>,  // TODO: drop this
-
-    /// Each element is the mean of a column of the ROI. Size is thus the ROI
-    /// width.
-    pub vertical_projection: Vec<f32>,  // TODO: drop this
 
     /// The location (in image coordinates) of the peak pixel (after correcting
     /// for hot pixels). If there are multiple pixels with the peak value, it is
@@ -1058,9 +1050,8 @@ pub struct RegionOfInterestSummary {
 /// # Returns
 /// [RegionOfInterestSummary] Information that compactly provides some information
 /// about the ROI. The `histogram` result can be used by an application's
-/// auto-exposure logic; the `horizontal_projection` and `vertical_projection`
-/// results can be used by an application to locate the brightest star in the
-/// ROI, even if it is severely out of focus.
+/// auto-exposure logic; the `peak_x` and `peak_y` result can be used to identify
+/// a target for focusing.
 ///
 /// # Panics
 /// The `roi` must exclude the three leftmost and three rightmost image columns.
@@ -1083,10 +1074,6 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
     let image_pixels: &Vec<u8> = image.as_raw();
 
     let mut histogram: [u32; 256] = [0_u32; 256];
-    let mut horizontal_projection_sum = Vec::<u32>::new();
-    let mut vertical_projection_sum = Vec::<u32>::new();
-    horizontal_projection_sum.resize(roi.height() as usize, 0_u32);
-    vertical_projection_sum.resize(roi.width() as usize, 0_u32);
 
     let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate) as i16, 2);
     let sigma_noise_1_5 = cmp::max((1.5 * sigma * noise_estimate) as i16, 1);
@@ -1103,10 +1090,6 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
                 gate_star_1d(gate, sigma_noise_2, sigma_noise_1_5,
                              /*detect_hot_pixels=*/true);
             histogram[pixel_value as usize] += 1;
-            horizontal_projection_sum[(rownum - roi.top()) as usize]
-                += pixel_value as u32;
-            vertical_projection_sum[(center_x - roi.left()) as usize]
-                += pixel_value as u32;
             if pixel_value > peak_val {
                 peak_x = center_x;
                 peak_y = rownum;
@@ -1115,16 +1098,9 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
             center_x += 1;
         }
     }
-    let h_proj: Vec<f32> = horizontal_projection_sum.into_iter().map(
-        |x| x as f32 / roi.width() as f32).collect();
-    let v_proj: Vec<f32> = vertical_projection_sum.into_iter().map(
-        |x| x as f32 / roi.height() as f32).collect();
 
     debug!("ROI processing completed in {:?}", process_roi_start.elapsed());
-    RegionOfInterestSummary{histogram,
-                            horizontal_projection: h_proj,
-                            vertical_projection: v_proj,
-                            peak_x, peak_y,
+    RegionOfInterestSummary{histogram, peak_x, peak_y,
     }
 }
 
@@ -1871,8 +1847,6 @@ mod tests {
         assert_eq!(roi_summary.histogram[11], 1);
         assert_eq!(roi_summary.histogram[20], 1);
         assert_eq!(roi_summary.histogram[32], 1);
-        assert_eq!(roi_summary.horizontal_projection, [8.0, 21.0]);
-        assert_eq!(roi_summary.vertical_projection, [9.0, 14.0, 20.5]);
         // The hot pixel is not the peak.
         assert_eq!(roi_summary.peak_x, 5);
         assert_eq!(roi_summary.peak_y, 1);
