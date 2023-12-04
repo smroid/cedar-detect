@@ -69,16 +69,17 @@ impl StarGate for MyStarGate {
         let mut binned_image: Option<GrayImage> = None;
         let (mut stars, hot_pixel_count);
         if req.use_binned_for_star_candidates {
-            let (local_binned_image, _) = bin_image(&req_image, noise_estimate, req.sigma);
-            let binned_noise_estimate = estimate_noise_from_image(&local_binned_image);
+            let (binned_image, _) = bin_image(&req_image, noise_estimate, req.sigma);
+            let binned_noise_estimate = estimate_noise_from_image(&binned_image);
             (stars, hot_pixel_count, _) =
-                get_stars_from_image(&local_binned_image, binned_noise_estimate,
+                get_stars_from_image(&binned_image, Some(&req_image),
+                                     binned_noise_estimate,
                                      req.sigma, req.max_size as u32,
                                      /*detect_hot_pixels=*/false,
                                      /*create_binned_image=*/false);
         } else {
             (stars, hot_pixel_count, binned_image) =
-                get_stars_from_image(&req_image, noise_estimate,
+                get_stars_from_image(&req_image, None, noise_estimate,
                                      req.sigma, req.max_size as u32,
                                      /*detect_hot_pixels=*/true,
                                      /*create_binned_image=*/req.return_binned);

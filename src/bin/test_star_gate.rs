@@ -83,19 +83,27 @@ fn process_file(file: &str, args: &Args) {
             return;
         },
     };
-    let mut img_u8 = img.to_luma8();
+    let img_u8 = img.to_luma8();
     let (width, height) = img_u8.dimensions();
 
     let star_extraction_start = Instant::now();
-    let mut noise_estimate = estimate_noise_from_image(&img_u8);
+    let noise_estimate = estimate_noise_from_image(&img_u8);
+    let mut stars;
     if args.binning {
-        (img_u8, _) = bin_image(&img_u8, noise_estimate, args.sigma);
-        noise_estimate = estimate_noise_from_image(&img_u8);
+        let (binned_img_u8, _) = bin_image(&img_u8, noise_estimate, args.sigma);
+        let binned_noise_estimate = estimate_noise_from_image(&binned_img_u8);
+        (stars, _, _) =
+            get_stars_from_image(&binned_img_u8, Some(&img_u8), binned_noise_estimate,
+                                 args.sigma, args.max_size,
+                                 /*detect_hot_pixels=*/!args.binning,
+                                 /*create_binned_image=*/false);
+    } else {
+        (stars, _, _) =
+            get_stars_from_image(&img_u8, None, noise_estimate,
+                                 args.sigma, args.max_size,
+                                 /*detect_hot_pixels=*/!args.binning,
+                                 /*create_binned_image=*/false);
     }
-    let (mut stars, _hot_pixel_count, _binned_image) =
-        get_stars_from_image(&img_u8, noise_estimate, args.sigma, args.max_size,
-                             /*detect_hot_pixels=*/!args.binning,
-                             /*create_binned_image=*/false);
     let elapsed = star_extraction_start.elapsed();
     info!("WxH: {}x{}; noise level {}", width, height, noise_estimate);
     info!("Star extraction found {} stars in {:?}", stars.len(), elapsed);
