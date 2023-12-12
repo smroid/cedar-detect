@@ -88,9 +88,6 @@ message StarCentroid {
   // neighbors). The estimated background is subtracted.
   float mean_brightness = 4;
 
-  // The estimated sky background near the star.
-  float background = 5;
-
   // Count of saturated pixel values.
   int32 num_saturated = 6;
 }

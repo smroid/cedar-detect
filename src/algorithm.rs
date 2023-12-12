@@ -542,9 +542,6 @@ pub struct StarDescription {
     /// neighbors). The estimated background is subtracted.
     pub mean_brightness: f32,
 
-    /// The estimated sky background near the star.
-    pub background: f32,
-
     /// Count of saturated pixel values.
     pub num_saturated: u16,
 }
@@ -763,18 +760,16 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
     }
 
     // Star passes all of the 2d gates!
-    Some(create_star_description(image, full_res_image, &margin,
-                                 background_est)) }
+    Some(create_star_description(image, full_res_image, &margin))
+}
 
 // Called when gate_star_2d() determines that a Blob is detected as containing a
 // star.
 // bounding_box: specifies the region encompassing the Blob plus some surround.
-// background_est: the average value of the "perimeter" pixels around the Blob.
 // full_res_image: if provided, arrange to do centroiding on the original
 //     resolution image.
 fn create_star_description(image: &GrayImage, full_res_image: Option<&GrayImage>,
-                           bounding_box: &Rect, background_est: f32)
-                           -> StarDescription {
+                           bounding_box: &Rect) -> StarDescription {
     let img: &GrayImage;
     let bb: Rect;
     match full_res_image {
@@ -788,34 +783,42 @@ fn create_star_description(image: &GrayImage, full_res_image: Option<&GrayImage>
             bb = *bounding_box;
         },
     }
+    let mut min_value = 255_u8;
+    for (_x, _y, pixel_value) in EnumeratePixels::new(
+        &img, &bb, /*include_interior=*/true) {
+        if pixel_value < min_value {
+            min_value = pixel_value;
+        }
+    }
 
     // Process the interior pixels (core plus some neighbors) to obtain moments.
     // Also note the count of saturated pixels.
     let mut num_saturated = 0;
-    let mut m0: f32 = 0.0;
-    let mut m1x: f32 = 0.0;
-    let mut m1y: f32 = 0.0;
+    let mut m0 = 0.0;
+    let mut m1x = 0.0;
+    let mut m1y = 0.0;
     for (x, y, pixel_value) in EnumeratePixels::new(
         &img, &bb, /*include_interior=*/true) {
         if pixel_value == 255 {
             num_saturated += 1;
         }
-        let val_minus_bkg = pixel_value as f32 - background_est;
-        m0 += val_minus_bkg;
-        m1x += x as f32 * val_minus_bkg;
-        m1y += y as f32 * val_minus_bkg;
+        let val = (pixel_value - min_value) as f32;
+        m0 += val;
+        m1x += x as f32 * val;
+        m1y += y as f32 * val;
     }
+
     // We use simple center-of-mass as the centroid.
     let centroid_x = m1x / m0;
     let centroid_y = m1y / m0;
     // Compute second moment about the centroid.
-    let mut m2x_c: f32 = 0.0;
-    let mut m2y_c: f32 = 0.0;
+    let mut m2x_c = 0.0;
+    let mut m2y_c = 0.0;
     for (x, y, pixel_value) in EnumeratePixels::new(
         &img, &bb, /*include_interior=*/true) {
-        let val_minus_bkg = pixel_value as f32 - background_est;
-        m2x_c += (x as f32 - centroid_x) * (x as f32 - centroid_x) * val_minus_bkg;
-        m2y_c += (y as f32 - centroid_y) * (y as f32 - centroid_y) * val_minus_bkg;
+        let val = (pixel_value - min_value) as f32;
+        m2x_c += (x as f32 - centroid_x) * (x as f32 - centroid_x) * val;
+        m2y_c += (y as f32 - centroid_y) * (y as f32 - centroid_y) * val;
     }
     let variance_x = m2x_c / m0;
     let variance_y = m2y_c / m0;
@@ -824,7 +827,6 @@ fn create_star_description(image: &GrayImage, full_res_image: Option<&GrayImage>
                     stddev_x: variance_x.sqrt() as f32,
                     stddev_y: variance_y.sqrt() as f32,
                     mean_brightness: m0 / (bb.width() * bb.height()) as f32,
-                    background: background_est,
                     num_saturated}
 }
 
@@ -1818,19 +1820,17 @@ mod tests {
         9,  9,  9,   9,  9,  9,  9);
         let neighbors = Rect::at(2, 2).of_size(3, 3);
         let star_description = create_star_description(
-            &image_7x7, None, &neighbors, /*background_est=*/9.01);
+            &image_7x7, None, &neighbors);
         assert_abs_diff_eq!(star_description.centroid_x,
                             3.53, epsilon = 0.01);
         assert_abs_diff_eq!(star_description.centroid_y,
-                            3.08, epsilon = 0.01);
+                            3.06, epsilon = 0.01);
         assert_abs_diff_eq!(star_description.stddev_x,
-                            0.27, epsilon = 0.01);
+                            0.20, epsilon = 0.01);
         assert_abs_diff_eq!(star_description.stddev_y,
-                            0.59, epsilon = 0.01);
+                            0.57, epsilon = 0.01);
         assert_abs_diff_eq!(star_description.mean_brightness,
-                            59.6, epsilon = 0.1);
-        assert_abs_diff_eq!(star_description.background,
-                            9.01, epsilon = 0.01);
+                            56.6, epsilon = 0.1);
         assert_eq!(star_description.num_saturated, 2);
     }
 

@@ -105,7 +105,6 @@ impl StarGate for MyStarGate {
                 stddev_x: star.stddev_x * coord_mul,
                 stddev_y: star.stddev_y * coord_mul,
                 mean_brightness: star.mean_brightness,
-                background: star.background,
                 num_saturated: star.num_saturated as i32,
             });
         }
