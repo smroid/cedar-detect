@@ -90,10 +90,13 @@ fn process_file(file: &str, args: &Args) {
     let noise_estimate = estimate_noise_from_image(&img_u8);
     let mut stars;
     if args.binning {
-        let (binned_img_u8, _) = bin_image(&img_u8, noise_estimate, args.sigma);
-        let binned_noise_estimate = estimate_noise_from_image(&binned_img_u8);
+        info!("bin_image");  // TEMPORARY
+        let (binned_img_u16, _) = bin_image(&img_u8, noise_estimate, args.sigma);
+        let binned_noise_estimate = estimate_noise_from_image(&binned_img_u16);
+        info!("estimate_noise from binned {}", binned_noise_estimate);  // TEMPORARY
+        info!("get_stars_from_image");  // TEMPORARY
         (stars, _, _) =
-            get_stars_from_image(&binned_img_u8, Some(&img_u8), binned_noise_estimate,
+            get_stars_from_image(&binned_img_u16, Some(&img_u8), binned_noise_estimate,
                                  args.sigma, args.max_size,
                                  /*detect_hot_pixels=*/false,
                                  /*create_binned_image=*/false);

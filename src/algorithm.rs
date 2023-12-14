@@ -112,18 +112,22 @@
 //!   the image's x/y coordinates; it is up to the application to apply any needed
 //!   lens distortion corrections.
 
+use std::any::TypeId;
 use std::cmp;
 use std::collections::hash_map::HashMap;
 use std::time::Instant;
 
-use image::GrayImage;
+use image::{GrayImage, ImageBuffer, Luma, Primitive};
 use imageproc::rect::Rect;
-use log::{debug};
+use log::{debug, info};
+
+type U16Image = ImageBuffer<Luma<u16>, Vec<u16>>;
 
 // An iterator over the pixels of a region of interest. Yields pixels in raster
 // scan order.
-struct EnumeratePixels<'a> {
-    image: &'a GrayImage,
+// P: u8 or u16.
+struct EnumeratePixels<'a, P: Primitive> {
+    image: &'a ImageBuffer<Luma<P>, Vec<P>>,
     roi: &'a Rect,
     include_interior: bool,
 
@@ -133,10 +137,10 @@ struct EnumeratePixels<'a> {
     cur_y: i32,
 }
 
-impl<'a> EnumeratePixels<'a> {
+impl<'a, P: Primitive> EnumeratePixels<'a, P> {
     // If include_interior is false, only the perimeter is enumerated.
-    fn new(image: &'a GrayImage, roi: &'a Rect, include_interior: bool)
-           -> EnumeratePixels<'a> {
+    fn new(image: &'a ImageBuffer<Luma<P>, Vec<P>>, roi: &'a Rect, include_interior: bool)
+           -> EnumeratePixels<'a, P> {
         let (width, height) = image.dimensions();
         assert!(roi.left() >= 0);
         assert!(roi.top() >= 0);
@@ -147,8 +151,9 @@ impl<'a> EnumeratePixels<'a> {
     }
 }
 
-impl<'a> Iterator for EnumeratePixels<'a> {
-    type Item = (i32, i32, u8);  // x, y, pixel value.
+// P: u8 or u16.
+impl<'a, P: Primitive> Iterator for EnumeratePixels<'a, P> {
+    type Item = (i32, i32, P);  // x, y, pixel value.
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.cur_y > self.roi.bottom() {
@@ -228,9 +233,14 @@ enum ResultType {
     Candidate,
     HotPixel,
 }
-fn gate_star_1d(gate: &[u8], sigma_noise_2: i16, sigma_noise_1_5: i16,
-                detect_hot_pixels: bool)
-                -> (/*corrected_value*/u8, ResultType) {
+
+// P: u8 (original) or u16 (2x2 binned).
+fn gate_star_1d<P: Primitive + std::fmt::Debug>(
+    gate: &[P], sigma_noise_2: i16, sigma_noise_1_5: i16,
+    detect_hot_pixels: bool)
+    -> (/*corrected_value*/P, ResultType)
+where u16: From<P>
+{
     debug_assert!(sigma_noise_2 > 0);
     debug_assert!(sigma_noise_1_5 > 0);
     debug_assert!(sigma_noise_1_5 <= sigma_noise_2);
@@ -238,15 +248,14 @@ fn gate_star_1d(gate: &[u8], sigma_noise_2: i16, sigma_noise_1_5: i16,
     // first eliminates bounds checks on the interior pixels. I would have
     // thought that the compiler would do this... in any case, the measured
     // performance doesn't seem to change.
-    let lb = gate[0] as i16;
-    let rb = gate[6] as i16;
+    let lb = u16::from(gate[0]) as i16;
+    let rb = u16::from(gate[6]) as i16;
 
-    let lm = gate[1] as i16;
-    let l = gate[2] as i16;
-    let c = gate[3] as i16;
-    let r = gate[4] as i16;
-    let rm = gate[5] as i16;
-    let c8 = gate[3];
+    let lm = u16::from(gate[1]) as i16;
+    let l = u16::from(gate[2]) as i16;
+    let c = u16::from(gate[3]) as i16;
+    let r = u16::from(gate[4]) as i16;
+    let rm = u16::from(gate[5]) as i16;
 
     // Center pixel must be sigma * estimated noise brighter than the estimated
     // background. Do this test first, because it eliminates the vast majority
@@ -254,29 +263,29 @@ fn gate_star_1d(gate: &[u8], sigma_noise_2: i16, sigma_noise_1_5: i16,
     let est_background_2 = lb + rb;
     let center_minus_background_2 = c + c - est_background_2;
     if center_minus_background_2 < sigma_noise_2 {
-        return (c8, ResultType::Uninteresting);
+        return (gate[3], ResultType::Uninteresting);
     }
     // Center pixel must be at least as bright as its immediate left/right
     // neighbors.
     if l > c || c < r {
-        return (c8, ResultType::Uninteresting);
+        return (gate[3], ResultType::Uninteresting);
     }
     // Center pixel must be strictly brighter than its left/right margin.
     if lm >= c || c <= rm {
-        return (c8, ResultType::Uninteresting);
+        return (gate[3], ResultType::Uninteresting);
     }
     if l == c {
         // Break tie between left and center.
         if lm > r {
             // Left will have been the center of its own candidate entry.
-            return (c8, ResultType::Uninteresting);
+            return (gate[3], ResultType::Uninteresting);
         }
     }
     if c == r {
         // Break tie between center and right.
         if l <= rm {
             // Right will be the center of its own candidate entry.
-            return (c8, ResultType::Uninteresting);
+            return (gate[3], ResultType::Uninteresting);
         }
     }
     // Average of l+r (minus background) must exceed 0.25 * center (minus
@@ -286,7 +295,7 @@ fn gate_star_1d(gate: &[u8], sigma_noise_2: i16, sigma_noise_1_5: i16,
         if 4 * sum_neighbors_minus_background <= center_minus_background_2 {
             // For ROI processing purposes, replace the hot pixel with its
             // neighbors' value.
-            return (((l + r) / 2) as u8, ResultType::HotPixel);
+            return (P::from((l + r) / 2).unwrap(), ResultType::HotPixel);
         }
     }
     // We require the border pixels to be ~uniformly dark. See if there is too
@@ -295,11 +304,11 @@ fn gate_star_1d(gate: &[u8], sigma_noise_2: i16, sigma_noise_1_5: i16,
     // rejection rate for actual sky background border pixels.
     let border_diff = (lb - rb).abs();
     if border_diff > sigma_noise_1_5 {
-        return (c8, ResultType::Uninteresting);
+        return (gate[3], ResultType::Uninteresting);
     }
     // We have a candidate star from our 1d analysis!
     debug!("candidate: {:?}", gate);
-    return (c8, ResultType::Candidate);
+    return (gate[3], ResultType::Candidate);
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -323,54 +332,57 @@ struct CandidateFrom1D {
 // Returns:
 // Vec<CandidateFrom1D>: the identifed star candidates, in raster scan order.
 // u32: count of hot pixels detected.
-// Option<GrayImage>: if `create_binned_image` is true, the 2x2 binning of `image`
-//   is returned.
-fn scan_image_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32,
-                             detect_hot_pixels: bool, create_binned_image: bool)
-                             -> (Vec<CandidateFrom1D>,
-                                 /*hot_pixel_count*/u32,
-                                 Option<GrayImage>,)
+// Option<U16Image>: if `create_binned_image` is true, the 2x2 binning of `image`
+//   is returned. Binning is by summing, and so the result is 10 bits.
+// P: u8 (original) or u16 (2x2 binned).
+fn scan_image_for_candidates<P: Primitive + std::fmt::Debug>(
+    image: &ImageBuffer<Luma<P>, Vec<P>>,
+    noise_estimate: f32, sigma: f32,
+    detect_hot_pixels: bool, create_binned_image: bool)
+    -> (Vec<CandidateFrom1D>, /*hot_pixel_count*/u32, Option<U16Image>,)
+where u16: From<P>
 {
     let row_scan_start = Instant::now();
     let mut hot_pixel_count = 0_u32;
     let width = image.dimensions().0 as usize;
     let height = image.dimensions().1 as usize;
-    let image_pixels: &Vec<u8> = image.as_raw();
+    let image_pixels: &Vec<P> = image.as_raw();
     let mut candidates = Vec::<CandidateFrom1D>::new();
     let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate + 0.5) as i16, 2);
     let sigma_noise_1_5 = cmp::max((1.5 * sigma * noise_estimate + 0.5) as i16, 1);
 
     let (binned_width, binned_height) = (width / 2, height / 2);
-    let mut binned_image_data = Vec::<u8>::new();
+    let mut binned_image_data = Vec::<u16>::new();
     if create_binned_image {
         // Allocate uninitialized storage to receive the 2x2 binned image data.
         let num_binned_pixels = binned_width * binned_height;
         binned_image_data.reserve(num_binned_pixels as usize);
         unsafe { binned_image_data.set_len(num_binned_pixels) }
     }
-    // Allocate accumulator row for binning.
+    // Allocate accumulator row for binning. TODO(smr): can we accumulate directly
+    // into binned_image_data (zero-initialized of course)?
     let mut binned_row = Vec::<u16>::new();
-    binned_row.resize(binned_width, 2);
+    binned_row.resize(binned_width, 0);
     let binned_slice: &mut[u16] = &mut binned_row[0..binned_width];
 
     for rownum in 0..height {
         // Get the slice of image_pixels corresponding to this row.
-        let row_pixels: &[u8] = &image_pixels.as_slice()
+        let row_pixels: &[P] = &image_pixels.as_slice()
             [rownum * width .. (rownum+1) * width];
         let mut center_x = 2_usize;
         // We duplicate the loops, slightly different according to
         // create_binned_image. We do this to avoid having a conditional on
         // create_binned_image in the inner loop.
         if create_binned_image {
-            binned_slice[0] += row_pixels[0] as u16;
-            binned_slice[0] += row_pixels[1] as u16;
-            binned_slice[1] += row_pixels[2] as u16;
+            binned_slice[0] += u16::from(row_pixels[0]);
+            binned_slice[0] += u16::from(row_pixels[1]);
+            binned_slice[1] += u16::from(row_pixels[2]);
             // Slide a 7 pixel gate across the row.
             for gate in row_pixels.windows(7) {
                 center_x += 1;
                 let (pixel_value, result_type) = gate_star_1d(
                     gate, sigma_noise_2, sigma_noise_1_5, detect_hot_pixels);
-                binned_slice[center_x / 2] += pixel_value as u16;
+                binned_slice[center_x / 2] += u16::from(pixel_value);
                 match result_type {
                     ResultType::Uninteresting => (),
                     ResultType::Candidate => {
@@ -382,20 +394,21 @@ fn scan_image_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32,
             }
             center_x += 1;
             while center_x < width - 1 {
-                binned_slice[center_x / 2] += row_pixels[center_x] as u16;
+                binned_slice[center_x / 2] += u16::from(row_pixels[center_x]);
                 center_x += 1;
             }
             if width & 1 == 0 {
                 // For even width, include final pixel in row.
-                binned_slice[center_x / 2] += row_pixels[center_x] as u16;
+                binned_slice[center_x / 2] += u16::from(row_pixels[center_x]);
             }
             if rownum & 1 != 0 {
                 let binned_rownum = rownum / 2;
-                let binned_image_row: &mut[u8] = &mut binned_image_data.as_mut_slice()
+                let binned_image_row: &mut[u16] = &mut binned_image_data.as_mut_slice()
                     [binned_rownum * binned_width .. (binned_rownum+1) * binned_width];
+                // TODO(smr): is there a library primitive for these?
                 for x in 0..binned_width {
-                    binned_image_row[x] = (binned_slice[x] / 4) as u8;
-                    binned_slice[x] = 2;
+                    binned_image_row[x] = binned_slice[x];
+                    binned_slice[x] = 0;
                 }
             }
         } else {
@@ -420,8 +433,8 @@ fn scan_image_for_candidates(image: &GrayImage, noise_estimate: f32, sigma: f32,
     if create_binned_image {
         (candidates,
          hot_pixel_count,
-         Some(GrayImage::from_raw(binned_width as u32, binned_height as u32,
-                                  binned_image_data).unwrap()),
+         Some(U16Image::from_raw(binned_width as u32, binned_height as u32,
+                                 binned_image_data).unwrap()),
         )
     } else {
         (candidates, hot_pixel_count, None)
@@ -585,11 +598,19 @@ pub struct StarDescription {
 //
 // Statistical significance is defined as a `sigma` multiple of the
 // `noise_estimate`.
-fn gate_star_2d(blob: &Blob, image: &GrayImage,
-                full_res_image: Option<&GrayImage>,
-                noise_estimate: f32, sigma: f32,
-                detect_hot_pixels: bool,
-                max_width: u32, max_height: u32) -> Option<StarDescription> {
+//
+// full_res_image: if provided, arrange to do centroiding on the original
+//     resolution image.
+//
+// P: u8 (original) or u16 (2x2 binned).
+fn gate_star_2d<P: Primitive + std::fmt::Debug + 'static>(
+    blob: &Blob, image: &ImageBuffer<Luma<P>, Vec<P>>,
+    full_res_image: Option<&GrayImage>,
+    noise_estimate: f32, sigma: f32,
+    detect_hot_pixels: bool,
+    max_width: u32, max_height: u32) -> Option<StarDescription>
+where i32: From<P>, u16: From<P>
+{
     let (image_width, image_height) = image.dimensions();
     // Compute the bounding box of all of the blob's center coords.
     let mut x_min = u32::MAX;
@@ -639,7 +660,7 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
     let mut core_count: i32 = 0;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
         &image, &core, /*include_interior=*/true) {
-        core_sum += pixel_value as i32;
+        core_sum += i32::from(pixel_value);
         core_count += 1;
     }
     let core_mean = core_sum as f32 / core_count as f32;
@@ -655,7 +676,7 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
         let mut outer_core_count: i32 = 0;
         for (_x, _y, pixel_value) in EnumeratePixels::new(
             &image, &core, /*include_interior=*/false) {
-            outer_core_sum += pixel_value as i32;
+            outer_core_sum += i32::from(pixel_value);
             outer_core_count += 1;
         }
         let outer_core_mean = outer_core_sum as f32 / outer_core_count as f32;
@@ -679,7 +700,7 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
         if is_corner {
             continue;  // Exclude corner pixels.
         }
-        neighbor_sum += pixel_value as i32;
+        neighbor_sum += i32::from(pixel_value);
         neighbor_count += 1;
     }
     let neighbor_mean = neighbor_sum as f32 / neighbor_count as f32;
@@ -696,7 +717,7 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
     let mut margin_count: i32 = 0;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
         &image, &margin, /*include_interior=*/false) {
-        margin_sum += pixel_value as i32;
+        margin_sum += i32::from(pixel_value);
         margin_count += 1;
     }
     let margin_mean = margin_sum as f32 / margin_count as f32;
@@ -710,14 +731,19 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
     // the background.
     let mut perimeter_sum: i32 = 0;
     let mut perimeter_count: i32 = 0;
-    let mut perimeter_min = u8::MAX;
-    let mut perimeter_max = 0_u8;
+    let mut perimeter_min = image.get_pixel(perimeter.left() as u32,
+                                            perimeter.top() as u32).0[0];
+    let mut perimeter_max = perimeter_min;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
         &image, &perimeter, /*include_interior=*/false) {
-        perimeter_sum += pixel_value as i32;
+        perimeter_sum += i32::from(pixel_value);
         perimeter_count += 1;
-        perimeter_min = cmp::min(perimeter_min, pixel_value);
-        perimeter_max = cmp::max(perimeter_max, pixel_value);
+        if pixel_value < perimeter_min {
+            perimeter_min = pixel_value;
+        }
+        if pixel_value > perimeter_max {
+            perimeter_max = pixel_value;
+        }
     }
     let background_est = perimeter_sum as f32 / perimeter_count as f32;
     debug!("background: {} for blob {:?}", background_est, core);
@@ -728,8 +754,8 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
     let mut perimeter_dev_2: f32 = 0.0;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
         &image, &perimeter, /*include_interior=*/false) {
-        perimeter_dev_2 += (pixel_value as f32 - background_est) *
-            (pixel_value as f32 - background_est);
+        let res = i32::from(pixel_value) as f32 - background_est;
+        perimeter_dev_2 += res * res;
     }
     let perimeter_stddev = (perimeter_dev_2 / perimeter_count as f32).sqrt();
     let max_noise_estimate = f32::max(noise_estimate, perimeter_stddev);
@@ -739,7 +765,8 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
     // pixel.
     // The 3/2 sigma_noise threshold is empirically chosen to yield a low
     // rejection rate for actual sky background perimeter pixels.
-    if (perimeter_max - perimeter_min) as f32 > 1.5 * sigma * noise_estimate {
+    if (i32::from(perimeter_max) - i32::from(perimeter_min)) as f32 >
+        1.5 * sigma * noise_estimate {
         debug!("Perimeter too varied for blob {:?}", core);
         return None;
     }
@@ -768,44 +795,69 @@ fn gate_star_2d(blob: &Blob, image: &GrayImage,
 // bounding_box: specifies the region encompassing the Blob plus some surround.
 // full_res_image: if provided, arrange to do centroiding on the original
 //     resolution image.
-fn create_star_description(image: &GrayImage, full_res_image: Option<&GrayImage>,
-                           bounding_box: &Rect) -> StarDescription {
-    let img: &GrayImage;
-    let bb: Rect;
+// P: u8 (original) or u16 (2x2 binned).
+fn create_star_description<P: Primitive + std::fmt::Debug + 'static>(
+    image: &ImageBuffer<Luma<P>, Vec<P>>,
+    full_res_image: Option<&GrayImage>,
+    bounding_box: &Rect) -> StarDescription
+where u16: From<P>
+{
     match full_res_image {
         Some(i) => {
-            img = i;
-            bb = Rect::at(bounding_box.left() * 2, bounding_box.top() * 2)
-                .of_size(bounding_box.width() * 2, bounding_box.height() * 2);
+            return compute_moments::<u8>(
+                i,
+                &Rect::at(bounding_box.left() * 2, bounding_box.top() * 2)
+                    .of_size(bounding_box.width() * 2, bounding_box.height() * 2),
+                255_u8);
         },
         None => {
-            img = image;
-            bb = *bounding_box;
+            if TypeId::of::<P>() == TypeId::of::<u8>() {
+                return compute_moments(image, &bounding_box, P::from(255_u8).unwrap());
+            } else {
+                return compute_moments(image, &bounding_box, P::from(1020_u16).unwrap());
+            }
         },
     }
-    let mut min_value = 255_u8;
+}
+
+// Computes zeroeth moment (brightness), first moment (position) and second
+// moment (position spread) of the `image` pixel values in the given
+// `bounding_box`.
+fn compute_moments<P: Primitive>(image: &ImageBuffer<Luma<P>, Vec<P>>,
+                                 bounding_box: &Rect,
+                                 saturated_pixel_value: P) -> StarDescription
+where u16: From<P>
+{
+    let mut num_saturated = 0;
+    let mut min_value = saturated_pixel_value;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
-        &img, &bb, /*include_interior=*/true) {
+        &image, &bounding_box, /*include_interior=*/true) {
         if pixel_value < min_value {
             min_value = pixel_value;
+        } else if pixel_value == saturated_pixel_value {
+            num_saturated += 1;
         }
     }
 
-    // Process the interior pixels (core plus some neighbors) to obtain moments.
-    // Also note the count of saturated pixels.
-    let mut num_saturated = 0;
     let mut m0 = 0.0;
     let mut m1x = 0.0;
     let mut m1y = 0.0;
     for (x, y, pixel_value) in EnumeratePixels::new(
-        &img, &bb, /*include_interior=*/true) {
-        if pixel_value == 255 {
-            num_saturated += 1;
-        }
-        let val = (pixel_value - min_value) as f32;
+        &image, &bounding_box, /*include_interior=*/true) {
+        let val = u16::from(pixel_value) as f32 - u16::from(min_value) as f32;
         m0 += val;
         m1x += x as f32 * val;
         m1y += y as f32 * val;
+    }
+    // Very unlikely, but return something sensible.
+    if m0 == 0.0 {
+        return StarDescription{
+            centroid_x: bounding_box.left() as f32 + bounding_box.width() as f32 / 2.0,
+            centroid_y: bounding_box.top() as f32 + bounding_box.height() as f32 / 2.0,
+            stddev_x: bounding_box.width() as f32,
+            stddev_y: bounding_box.height() as f32,
+            mean_brightness: 0.0,
+            num_saturated};
     }
 
     // We use simple center-of-mass as the centroid.
@@ -815,19 +867,20 @@ fn create_star_description(image: &GrayImage, full_res_image: Option<&GrayImage>
     let mut m2x_c = 0.0;
     let mut m2y_c = 0.0;
     for (x, y, pixel_value) in EnumeratePixels::new(
-        &img, &bb, /*include_interior=*/true) {
-        let val = (pixel_value - min_value) as f32;
+        &image, &bounding_box, /*include_interior=*/true) {
+        let val = u16::from(pixel_value) as f32 - u16::from(min_value) as f32;
         m2x_c += (x as f32 - centroid_x) * (x as f32 - centroid_x) * val;
         m2y_c += (y as f32 - centroid_y) * (y as f32 - centroid_y) * val;
     }
     let variance_x = m2x_c / m0;
     let variance_y = m2y_c / m0;
-    StarDescription{centroid_x: (centroid_x + 0.5) as f32,
-                    centroid_y: (centroid_y + 0.5) as f32,
-                    stddev_x: variance_x.sqrt() as f32,
-                    stddev_y: variance_y.sqrt() as f32,
-                    mean_brightness: m0 / (bb.width() * bb.height()) as f32,
-                    num_saturated}
+    StarDescription{
+        centroid_x: (centroid_x + 0.5) as f32,
+        centroid_y: (centroid_y + 0.5) as f32,
+        stddev_x: variance_x.sqrt() as f32,
+        stddev_y: variance_y.sqrt() as f32,
+        mean_brightness: m0 / (bounding_box.width() * bounding_box.height()) as f32,
+        num_saturated}
 }
 
 /// Estimates the RMS noise of the given image. A small portion of the image
@@ -838,7 +891,11 @@ fn create_star_description(image: &GrayImage, full_res_image: Option<&GrayImage>
 /// To guard against accidentally sampling a bright part of the image (moon?
 /// streetlamp?), we sample a few image regions and choose the darkest one to
 /// measure the noise.
-pub fn estimate_noise_from_image(image: &GrayImage) -> f32 {
+// P: u8 or u16.
+pub fn estimate_noise_from_image<P: Primitive>(
+    image: &ImageBuffer<Luma<P>, Vec<P>>) -> f32
+where usize: From<P>
+{
     let noise_start = Instant::now();
     let (width, height) = image.dimensions();
     let box_size = cmp::min(30, cmp::min(width, height) / 4);
@@ -863,12 +920,18 @@ pub fn estimate_noise_from_image(image: &GrayImage) -> f32 {
 // Returns (median, stddev) for the given image region. Excludes bright pixels
 // that are likely to be stars, as we're interested in the median/stddev of the
 // sky background.
-fn stats_for_roi(image: &GrayImage, roi: &Rect) -> (/*median*/f32, /*stddev*/f32) {
-    let mut histogram: [u32; 256] = [0; 256];
+// P: u8 or u16.
+fn stats_for_roi<P: Primitive>(image: &ImageBuffer<Luma<P>, Vec<P>>,
+                               roi: &Rect) -> (/*median*/f32, /*stddev*/f32)
+where usize: From<P>,
+{
+    // P is either 8 bits or 10 bits (2x2 binned values). Size histogram
+    // accordingly.
+    let mut histogram: [u32; 1024] = [0; 1024];
     let mut pixel_count = 0;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
         &image, &roi, /*include_interior=*/true) {
-        histogram[pixel_value as usize] += 1;
+        histogram[usize::from(pixel_value)] += 1;
         pixel_count += 1;
     }
     // Do a sloppy trim of the brightest pixels; this will give us a de-starred
@@ -882,7 +945,7 @@ fn stats_for_roi(image: &GrayImage, roi: &Rect) -> (/*median*/f32, /*stddev*/f32
     // kicked out of the histogram.
     let star_cutoff = (trimmed_median as f32 +
                        8.0 as f32 * f32::max(trimmed_stddev, 1.0)) as usize;
-    for h in 0_usize..256 {
+    for h in 0_usize..1024 {
         if h >= star_cutoff {
             histogram[h] = 0;
         }
@@ -892,11 +955,11 @@ fn stats_for_roi(image: &GrayImage, roi: &Rect) -> (/*median*/f32, /*stddev*/f32
     (median as f32, stddev)
 }
 
-fn trim_histogram(histogram: &[u32; 256], count_to_keep: u32)
-                  -> [u32; 256] {
+fn trim_histogram(histogram: &[u32; 1024], count_to_keep: u32)
+                  -> [u32; 1024] {
     let mut trimmed_histogram = *histogram;
     let mut count = 0;
-    for h in 0..256 {
+    for h in 0..1024 {
         let bin_count = trimmed_histogram[h];
         if count + bin_count > count_to_keep {
             let excess = count + bin_count - count_to_keep;
@@ -907,11 +970,11 @@ fn trim_histogram(histogram: &[u32; 256], count_to_keep: u32)
     return trimmed_histogram;
 }
 
-fn stats_for_histogram(histogram: &[u32; 256])
+fn stats_for_histogram(histogram: &[u32; 1024])
                        -> (/*mean*/f32, /*stddev*/f32, /*median*/usize) {
     let mut count = 0;
     let mut first_moment = 0;
-    for h in 0..256 {
+    for h in 0..1024 {
         let bin_count = histogram[h];
         count += bin_count;
         first_moment += bin_count * h as u32;
@@ -923,7 +986,7 @@ fn stats_for_histogram(histogram: &[u32; 256])
     let mut second_moment: f32 = 0.0;
     let mut sub_count = 0;
     let mut median = 0;
-    for h in 0..256 {
+    for h in 0..1024 {
         let bin_count = histogram[h];
         second_moment += bin_count as f32 * (h as f32 - mean) * (h as f32 - mean);
         if sub_count < count / 2 {
@@ -977,18 +1040,26 @@ fn stats_for_histogram(histogram: &[u32; 256])
 /// u32: The number of hot pixels seen. See implementation for more information
 /// about hot pixels.
 ///
-/// Option<GrayImage>: if `create_binned_image` is true, the 2x2 binning of `image`
+/// Option<U16Image>: if `create_binned_image` is true, the 2x2 binning of `image`
 ///   is returned.
-pub fn get_stars_from_image(image: &GrayImage, full_res_image: Option<&GrayImage>,
-                            noise_estimate: f32, sigma: f32, max_size: u32,
-                            detect_hot_pixels: bool, create_binned_image: bool)
-                            -> (Vec<StarDescription>,
-                                /*hot_pixel_count*/u32,
-                                Option<GrayImage>)
+// TODO(smr): reorganize API to take two binning bools: one for doing star
+// detection in binned image; the other for returning the binned image; return
+// binned image as GrayImage.
+//
+// P: u8 (original) or u16 (2x2 binned).
+pub fn get_stars_from_image<P: Primitive + std::fmt::Debug + 'static>(
+    image: &ImageBuffer<Luma<P>, Vec<P>>,
+    full_res_image: Option<&GrayImage>,
+    noise_estimate: f32, sigma: f32, max_size: u32,
+    detect_hot_pixels: bool,
+    create_binned_image: bool)
+    -> (Vec<StarDescription>, /*hot_pixel_count*/u32, Option<U16Image>)
+where u16: From<P>, i32: From<P>
 {
     // If noise estimate is below 0.5, assume that the image background has been
     // crushed to black; use a minimum noise value.
-    let corrected_noise_estimate = f32::max(noise_estimate, 0.5);
+    // let corrected_noise_estimate = f32::max(noise_estimate, 0.5);
+    let corrected_noise_estimate = f32::max(noise_estimate, 2.0);
 
     let mut stars = Vec::<StarDescription>::new();
     let (candidates, hot_pixel_count, binned_image) =
@@ -1030,11 +1101,11 @@ pub fn get_stars_from_image(image: &GrayImage, full_res_image: Option<&GrayImage
 ///   discriminating hot pixels.
 ///
 /// # Returns
-/// GrayImage: the 2x2 binning of `image`.
+/// U16Image: the 2x2 binning of `image`.
 ///
 /// u32: The number of hot pixels seen.
 pub fn bin_image(image: &GrayImage, noise_estimate: f32, sigma: f32)
-                 -> (GrayImage, u32) {
+                 -> (U16Image, u32) {
     // If noise estimate is below 0.5, assume that the image background has been
     // crushed to black; use a minimum noise value.
     let corrected_noise_estimate = f32::max(noise_estimate, 0.5);

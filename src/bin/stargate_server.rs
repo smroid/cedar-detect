@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use clap::Parser;
 use env_logger;
-use image::GrayImage;
+use image::{GrayImage, ImageBuffer, Luma};
 use libc::{close, mmap, shm_open, c_char, O_RDONLY, PROT_READ, MAP_SHARED};
 use log::{info};
 
@@ -12,6 +12,8 @@ use ::star_gate::algorithm::{bin_image, estimate_noise_from_image, get_stars_fro
 use crate::star_gate::star_gate_server::{StarGate, StarGateServer};
 
 use tonic_web::GrpcWebLayer;
+
+type U16Image = ImageBuffer<Luma<u16>, Vec<u16>>;
 
 pub mod star_gate {
     // The string specified here must match the proto package name.
@@ -66,7 +68,7 @@ impl StarGate for MyStarGate {
         }
 
         let noise_estimate = estimate_noise_from_image(&req_image);
-        let mut binned_image: Option<GrayImage> = None;
+        let mut binned_image: Option<U16Image> = None;
         let (mut stars, hot_pixel_count);
         if req.use_binned_for_star_candidates {
             let (binned_image, _) = bin_image(&req_image, noise_estimate, req.sigma);
@@ -113,13 +115,14 @@ impl StarGate for MyStarGate {
             hot_pixel_count: hot_pixel_count as i32,
             star_candidates: candidates,
             binned_image: if binned_image.is_some() {
-                let bimg: GrayImage = binned_image.unwrap();
-                Some(star_gate::Image {
-                    width: bimg.width() as i32,
-                    height: bimg.height() as i32,
-                    image_data: bimg.into_raw(),
-                    shmem_name: None,
-                })
+                None
+                // let bimg: U16Image = binned_image.unwrap();
+                // Some(star_gate::Image {
+                //     width: bimg.width() as i32,
+                //     height: bimg.height() as i32,
+                //     image_data: bimg.into_raw(),
+                //     shmem_name: None,
+                // })
             } else {
                 None
             },
