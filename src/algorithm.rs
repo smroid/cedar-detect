@@ -78,8 +78,8 @@
 //!   adjacent pixels, StarGate will reject the bright star.
 //! * Pixel scale and focusing are crucial:
 //!   * If star images are too extended w.r.t. the pixel grid, StarGate will not
-//!     detect the stars. You'll either need to tighten the focus or use pixel
-//!     binning before calling [get_stars_from_image()].
+//!     detect the stars. You'll either need to tighten the focus or use the pixel
+//!     binning option when calling [get_stars_from_image()].
 //!   * If pixels are too large w.r.t. the stars' images, StarGate will
 //!     mis-classify many stars as hot pixels. A simple remedy is to slightly
 //!     defocus such that stars occupy a central peak pixel with a bit of spread
@@ -112,16 +112,15 @@
 //!   the image's x/y coordinates; it is up to the application to apply any needed
 //!   lens distortion corrections.
 
-use std::any::TypeId;
 use std::cmp;
 use std::collections::hash_map::HashMap;
 use std::time::Instant;
 
 use image::{GrayImage, ImageBuffer, Luma, Primitive};
 use imageproc::rect::Rect;
-use log::{debug, info};
+use log::{debug};
 
-type U16Image = ImageBuffer<Luma<u16>, Vec<u16>>;
+type Gray16Image = ImageBuffer<Luma<u16>, Vec<u16>>;
 
 // An iterator over the pixels of a region of interest. Yields pixels in raster
 // scan order.
@@ -328,22 +327,23 @@ struct CandidateFrom1D {
 // `detect_hot_pixels` Determines whether hot pixel detection/substitution is
 //     done.
 // `create_binned_image` If true, a 2x2 binning of `image` is returned. Note that
-//     hot pixels are replaced prior to the binning process.
+//     hot pixels are replaced during the binning process.
 // Returns:
 // Vec<CandidateFrom1D>: the identifed star candidates, in raster scan order.
-// u32: count of hot pixels detected.
-// Option<U16Image>: if `create_binned_image` is true, the 2x2 binning of `image`
-//   is returned. Binning is by summing, and so the result is 10 bits.
+// i32: count of hot pixels detected.
+// Option<Gray16Image>: if `create_binned_image` is true, the 2x2 binning of `image`
+//   is returned. Binning is by summing, and so the result pixels are 2 bits
+//   wider than the input.
 // P: u8 (original) or u16 (2x2 binned).
 fn scan_image_for_candidates<P: Primitive + std::fmt::Debug>(
     image: &ImageBuffer<Luma<P>, Vec<P>>,
     noise_estimate: f32, sigma: f32,
     detect_hot_pixels: bool, create_binned_image: bool)
-    -> (Vec<CandidateFrom1D>, /*hot_pixel_count*/u32, Option<U16Image>,)
+    -> (Vec<CandidateFrom1D>, /*hot_pixel_count*/i32, Option<Gray16Image>,)
 where u16: From<P>
 {
     let row_scan_start = Instant::now();
-    let mut hot_pixel_count = 0_u32;
+    let mut hot_pixel_count = 0;
     let width = image.dimensions().0 as usize;
     let height = image.dimensions().1 as usize;
     let image_pixels: &Vec<P> = image.as_raw();
@@ -433,7 +433,7 @@ where u16: From<P>
     if create_binned_image {
         (candidates,
          hot_pixel_count,
-         Some(U16Image::from_raw(binned_width as u32, binned_height as u32,
+         Some(Gray16Image::from_raw(binned_width as u32, binned_height as u32,
                                  binned_image_data).unwrap()),
         )
     } else {
@@ -599,17 +599,21 @@ pub struct StarDescription {
 // Statistical significance is defined as a `sigma` multiple of the
 // `noise_estimate`.
 //
-// full_res_image: if provided, arrange to do centroiding on the original
-//     resolution image.
+// image: This is either the original full resolution image (8 bits), or a
+//     2x2 binned image (10 bits).
+//
+// full_res_image: Regardless of whether `image` is the original or a 2x2
+//     binning, we arrange to do centroiding on the original resolution image.
 //
 // P: u8 (original) or u16 (2x2 binned).
-fn gate_star_2d<P: Primitive + std::fmt::Debug + 'static>(
-    blob: &Blob, image: &ImageBuffer<Luma<P>, Vec<P>>,
-    full_res_image: Option<&GrayImage>,
+fn gate_star_2d<P: Primitive>(
+    blob: &Blob,
+    image: &ImageBuffer<Luma<P>, Vec<P>>,
+    full_res_image: &GrayImage,
     noise_estimate: f32, sigma: f32,
     detect_hot_pixels: bool,
     max_width: u32, max_height: u32) -> Option<StarDescription>
-where i32: From<P>, u16: From<P>
+where i32: From<P>
 {
     let (image_width, image_height) = image.dimensions();
     // Compute the bounding box of all of the blob's center coords.
@@ -787,54 +791,30 @@ where i32: From<P>, u16: From<P>
     }
 
     // Star passes all of the 2d gates!
-    Some(create_star_description(image, full_res_image, &margin))
-}
 
-// Called when gate_star_2d() determines that a Blob is detected as containing a
-// star.
-// bounding_box: specifies the region encompassing the Blob plus some surround.
-// full_res_image: if provided, arrange to do centroiding on the original
-//     resolution image.
-// P: u8 (original) or u16 (2x2 binned).
-fn create_star_description<P: Primitive + std::fmt::Debug + 'static>(
-    image: &ImageBuffer<Luma<P>, Vec<P>>,
-    full_res_image: Option<&GrayImage>,
-    bounding_box: &Rect) -> StarDescription
-where u16: From<P>
-{
-    match full_res_image {
-        Some(i) => {
-            return compute_moments::<u8>(
-                i,
-                &Rect::at(bounding_box.left() * 2, bounding_box.top() * 2)
-                    .of_size(bounding_box.width() * 2, bounding_box.height() * 2),
-                255_u8);
-        },
-        None => {
-            if TypeId::of::<P>() == TypeId::of::<u8>() {
-                return compute_moments(image, &bounding_box, P::from(255_u8).unwrap());
-            } else {
-                return compute_moments(image, &bounding_box, P::from(1020_u16).unwrap());
-            }
-        },
+    if image_width < full_res_image.dimensions().0 {
+        // The `image` is binned.
+        let full_res_margin =
+            Rect::at(margin.left() * 2, margin.top() * 2)
+            .of_size(margin.width() * 2, margin.height() * 2);
+        Some(compute_moments(full_res_image, &full_res_margin))
+    } else {
+        Some(compute_moments(full_res_image, &margin))
     }
 }
 
 // Computes zeroeth moment (brightness), first moment (position) and second
 // moment (position spread) of the `image` pixel values in the given
 // `bounding_box`.
-fn compute_moments<P: Primitive>(image: &ImageBuffer<Luma<P>, Vec<P>>,
-                                 bounding_box: &Rect,
-                                 saturated_pixel_value: P) -> StarDescription
-where u16: From<P>
-{
+fn compute_moments(image: &GrayImage, bounding_box: &Rect) -> StarDescription {
     let mut num_saturated = 0;
-    let mut min_value = saturated_pixel_value;
+    let mut min_value = 255_u8;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
         &image, &bounding_box, /*include_interior=*/true) {
         if pixel_value < min_value {
             min_value = pixel_value;
-        } else if pixel_value == saturated_pixel_value {
+        }
+        if pixel_value == 255_u8 {
             num_saturated += 1;
         }
     }
@@ -844,7 +824,7 @@ where u16: From<P>
     let mut m1y = 0.0;
     for (x, y, pixel_value) in EnumeratePixels::new(
         &image, &bounding_box, /*include_interior=*/true) {
-        let val = u16::from(pixel_value) as f32 - u16::from(min_value) as f32;
+        let val = pixel_value as f32 - min_value as f32;
         m0 += val;
         m1x += x as f32 * val;
         m1y += y as f32 * val;
@@ -868,7 +848,7 @@ where u16: From<P>
     let mut m2y_c = 0.0;
     for (x, y, pixel_value) in EnumeratePixels::new(
         &image, &bounding_box, /*include_interior=*/true) {
-        let val = u16::from(pixel_value) as f32 - u16::from(min_value) as f32;
+        let val = pixel_value as f32 - min_value as f32;
         m2x_c += (x as f32 - centroid_x) * (x as f32 - centroid_x) * val;
         m2y_c += (y as f32 - centroid_y) * (y as f32 - centroid_y) * val;
     }
@@ -1007,10 +987,6 @@ fn stats_for_histogram(histogram: &[u32; 1024])
 ///   `image` - The image to analyze. The entire image is scanned for stars,
 ///   excluding the three leftmost and three rightmost columns.
 ///
-///   `full_res_image` - If provided, `image` is the 2x2 binned image and this
-///   is the original image. The returned StarDescriptions are in the full
-///   resolution image's coordinate system.
-///
 ///   `noise_estimate` The noise level of `image`. This is typically the noise
 ///   level returned by [estimate_noise_from_image()].
 ///
@@ -1027,93 +1003,102 @@ fn stats_for_histogram(histogram: &[u32; 1024])
 ///   bright stars that "bleed" to many surrounding pixels. Typical `max_size`
 ///   values: 3-5.
 ///
-///   `detect_hot_pixels` - Determines if hot pixel detection/replacement is
-///   applied. If true, hot pixel replacement is done prior to star detection
-///   and (if requested) binning.
+///   `use_binned_image` If true a 2x2 binning of `image` (with hot pixels
+///   removed) is used for star detection. Note that computing the centroids of
+///   detected stars is always done in the full resolution `image`.
 ///
-///   `create_binned_image` - Determines if a 2x2 binning of `image` should be
-///   returned.
+///   `return_binned_image` If true, a 2x2 binning of `image` is returned. Note
+///   that hot pixels are replaced during the binning process.
 ///
 /// # Returns
 /// Vec<[StarDescription]>, in unspecified order.
 ///
-/// u32: The number of hot pixels seen. See implementation for more information
+/// i32: The number of hot pixels seen. See implementation for more information
 /// about hot pixels.
 ///
-/// Option<U16Image>: if `create_binned_image` is true, the 2x2 binning of `image`
+/// Option<GrayImage>: if `create_binned_image` is true, the 2x2 binning of `image`
 ///   is returned.
-// TODO(smr): reorganize API to take two binning bools: one for doing star
-// detection in binned image; the other for returning the binned image; return
-// binned image as GrayImage.
-//
-// P: u8 (original) or u16 (2x2 binned).
-pub fn get_stars_from_image<P: Primitive + std::fmt::Debug + 'static>(
-    image: &ImageBuffer<Luma<P>, Vec<P>>,
-    full_res_image: Option<&GrayImage>,
+pub fn get_stars_from_image(
+    image: &GrayImage,
     noise_estimate: f32, sigma: f32, max_size: u32,
-    detect_hot_pixels: bool,
-    create_binned_image: bool)
-    -> (Vec<StarDescription>, /*hot_pixel_count*/u32, Option<U16Image>)
-where u16: From<P>, i32: From<P>
-{
+    use_binned_image: bool,
+    return_binned_image: bool)
+    -> (Vec<StarDescription>, /*hot_pixel_count*/i32, Option<GrayImage>) {
     // If noise estimate is below 0.5, assume that the image background has been
     // crushed to black; use a minimum noise value.
-    // let corrected_noise_estimate = f32::max(noise_estimate, 0.5);
-    let corrected_noise_estimate = f32::max(noise_estimate, 2.0);
+    let noise_estimate8 = f32::max(noise_estimate, 0.5);
+
+    let mut binned_image: Option<Gray16Image> = None;
+    let mut hot_pixel_count = 0;
+    if use_binned_image || return_binned_image {
+        (_, hot_pixel_count, binned_image) =
+            scan_image_for_candidates(image, noise_estimate8, sigma,
+                                      /*detect_hot_pixels=*/true,
+                                      /*create_binned_image=*/true);
+    }
 
     let mut stars = Vec::<StarDescription>::new();
-    let (candidates, hot_pixel_count, binned_image) =
-        scan_image_for_candidates(image, corrected_noise_estimate, sigma,
-                                  detect_hot_pixels, create_binned_image);
-    for blob in form_blobs_from_candidates(candidates) {
-        match gate_star_2d(&blob, image, full_res_image,
-                           corrected_noise_estimate, sigma,
-                           detect_hot_pixels, max_size, max_size) {
-            Some(x) => stars.push(x),
-            None => ()
+    if use_binned_image {
+        let binned_noise_estimate = estimate_noise_from_image(
+            &binned_image.as_ref().unwrap());
+        // Use a higher noise floor for 10-bit binned image.
+        let noise_estimate10 = f32::max(binned_noise_estimate, 1.5);
+        let (candidates, _, _) =
+            scan_image_for_candidates(&binned_image.as_ref().unwrap(),
+                                      noise_estimate10, sigma,
+                                      /*detect_hot_pixels=*/false,
+                                      /*create_binned_image=*/false);
+        for blob in form_blobs_from_candidates(candidates) {
+            match gate_star_2d(&blob, &binned_image.as_ref().unwrap(),
+                               /*full_res_image=*/image,
+                               noise_estimate10, sigma,
+                               /*detect_hot_pixels=*/false,
+                               max_size/2 + 1, max_size/2 + 1) {
+                Some(x) => stars.push(x),
+                None => ()
+            }
+        }
+    } else {
+        let (candidates, local_hot_pixel_count, _) =
+            scan_image_for_candidates(image, noise_estimate8, sigma,
+                                      /*detect_hot_pixels=*/true,
+                                      /*create_binned_image=*/false);
+        hot_pixel_count = local_hot_pixel_count;
+        for blob in form_blobs_from_candidates(candidates) {
+            match gate_star_2d(&blob, image,
+                               /*full_res_image=*/image,
+                               noise_estimate8, sigma,
+                               /*detect_hot_pixels=*/true,
+                               max_size, max_size) {
+                Some(x) => stars.push(x),
+                None => ()
+            }
         }
     }
-    // A hot pixel is defined to be a single bright pixel whose immediate
-    // neighbors are at sky background level. Normally the hot pixel count is
-    // ~constant for a given image detector. get_stars_from_image() returns this
-    // value to allow application logic to detect situations where too-sharp
-    // focus with large pixels can cause stars to be mis-classified as hot
-    // pixels. From an initial defocused state, as focus is improved, the number
-    // of detected stars rises, but as we advance into the too-focused regime,
-    // the number of detected star candidates will drop as the number of
-    // reported hot pixels rises. A rising hot pixel count can be a cue to the
-    // application logic that over-focusing is happening.
-    (stars, hot_pixel_count, binned_image)
-}
 
-/// This function creates a 2x2 binned image. Hot pixels are detected and
-/// substituted prior to the binning.
-///
-/// # Arguments
-///   `image` - The image to bin 2x2. If the width is odd, the last column
-///   does not contibute to the result; if the height is odd the last row
-///   does not contribute.
-///
-///   `noise_estimate` The noise level of `image`. This is typically the noise
-///   level returned by [estimate_noise_from_image()].
-///
-///   `sigma` - Specifies the statistical significance threshold used for
-///   discriminating hot pixels.
-///
-/// # Returns
-/// U16Image: the 2x2 binning of `image`.
-///
-/// u32: The number of hot pixels seen.
-pub fn bin_image(image: &GrayImage, noise_estimate: f32, sigma: f32)
-                 -> (U16Image, u32) {
-    // If noise estimate is below 0.5, assume that the image background has been
-    // crushed to black; use a minimum noise value.
-    let corrected_noise_estimate = f32::max(noise_estimate, 0.5);
-    let (_candidates, hot_pixel_count, binned_image) =
-        scan_image_for_candidates(image, corrected_noise_estimate, sigma,
-                                  /*detect_hot_pixels=*/true,
-                                  /*create_binned_image=*/true);
-    (binned_image.unwrap(), hot_pixel_count)
+    if return_binned_image {
+        let img10 = binned_image.unwrap();
+        let (width, height) = img10.dimensions();
+        // Convert img10 to 8 bits by dividing each pixel value by 4.
+        let mut out_image_data = Vec::<u8>::new();
+        // Allocate uninitialized storage to receive the divided-by-4 image data.
+        let num_binned_pixels = (width * height) as usize;
+        out_image_data.reserve(num_binned_pixels);
+        unsafe { out_image_data.set_len(num_binned_pixels) }
+
+        let in_image_slice: &[u16] =
+            &img10.as_raw().as_slice()[0 .. num_binned_pixels];
+        let out_image_slice: &mut[u8] =
+            &mut out_image_data.as_mut_slice()[0 .. num_binned_pixels];
+        // TODO(smr): is there a library primitive for this?
+        for x in 0..num_binned_pixels {
+            out_image_slice[x] = (in_image_slice[x] / 4) as u8;
+        }
+        (stars, hot_pixel_count,
+         Some(GrayImage::from_raw(width, height, out_image_data).unwrap()))
+    } else {
+        (stars, hot_pixel_count, None)
+    }
 }
 
 /// Summarizes an image region of interest. The pixel values used are not
@@ -1161,6 +1146,7 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
                                     -> RegionOfInterestSummary {
     let process_roi_start = Instant::now();
 
+    // TODO(smr): apply centroiding to get sub-pixel resolution for peak_x/y.
     let mut peak_x = 0;
     let mut peak_y = 0;
     let mut peak_val = 0_u8;

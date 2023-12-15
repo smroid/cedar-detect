@@ -4,16 +4,14 @@ use std::time::Instant;
 
 use clap::Parser;
 use env_logger;
-use image::{GrayImage, ImageBuffer, Luma};
+use image::{GrayImage};
 use libc::{close, mmap, shm_open, c_char, O_RDONLY, PROT_READ, MAP_SHARED};
 use log::{info};
 
-use ::star_gate::algorithm::{bin_image, estimate_noise_from_image, get_stars_from_image};
+use ::star_gate::algorithm::{estimate_noise_from_image, get_stars_from_image};
 use crate::star_gate::star_gate_server::{StarGate, StarGateServer};
 
 use tonic_web::GrpcWebLayer;
-
-type U16Image = ImageBuffer<Luma<u16>, Vec<u16>>;
 
 pub mod star_gate {
     // The string specified here must match the proto package name.
@@ -68,24 +66,10 @@ impl StarGate for MyStarGate {
         }
 
         let noise_estimate = estimate_noise_from_image(&req_image);
-        let mut binned_image: Option<U16Image> = None;
-        let (mut stars, hot_pixel_count);
-        if req.use_binned_for_star_candidates {
-            let (binned_image, _) = bin_image(&req_image, noise_estimate, req.sigma);
-            let binned_noise_estimate = estimate_noise_from_image(&binned_image);
-            (stars, hot_pixel_count, _) =
-                get_stars_from_image(&binned_image, Some(&req_image),
-                                     binned_noise_estimate,
-                                     req.sigma, req.max_size as u32,
-                                     /*detect_hot_pixels=*/false,
-                                     /*create_binned_image=*/false);
-        } else {
-            (stars, hot_pixel_count, binned_image) =
-                get_stars_from_image(&req_image, None, noise_estimate,
-                                     req.sigma, req.max_size as u32,
-                                     /*detect_hot_pixels=*/true,
-                                     /*create_binned_image=*/req.return_binned);
-        }
+        let (mut stars, hot_pixel_count, binned_image) = get_stars_from_image(
+            &req_image, noise_estimate, req.sigma, req.max_size as u32,
+            req.use_binned_for_star_candidates, req.return_binned);
+
         if using_shmem {
             // Deconstruct req_image that is referencing shared memory.
             let vec_shmem = req_image.into_raw();

@@ -9,7 +9,7 @@ use image::Rgb;
 use imageproc::drawing;
 use log::{info, warn};
 
-use star_gate::algorithm::{bin_image, estimate_noise_from_image, get_stars_from_image};
+use star_gate::algorithm::{estimate_noise_from_image, get_stars_from_image};
 
 /// Example program for running the StarGate star finding algorithm
 /// on test image(s).
@@ -88,25 +88,9 @@ fn process_file(file: &str, args: &Args) {
 
     let star_extraction_start = Instant::now();
     let noise_estimate = estimate_noise_from_image(&img_u8);
-    let mut stars;
-    if args.binning {
-        info!("bin_image");  // TEMPORARY
-        let (binned_img_u16, _) = bin_image(&img_u8, noise_estimate, args.sigma);
-        let binned_noise_estimate = estimate_noise_from_image(&binned_img_u16);
-        info!("estimate_noise from binned {}", binned_noise_estimate);  // TEMPORARY
-        info!("get_stars_from_image");  // TEMPORARY
-        (stars, _, _) =
-            get_stars_from_image(&binned_img_u16, Some(&img_u8), binned_noise_estimate,
-                                 args.sigma, args.max_size,
-                                 /*detect_hot_pixels=*/false,
-                                 /*create_binned_image=*/false);
-    } else {
-        (stars, _, _) =
-            get_stars_from_image(&img_u8, None, noise_estimate,
-                                 args.sigma, args.max_size,
-                                 /*detect_hot_pixels=*/true,
-                                 /*create_binned_image=*/false);
-    }
+    let (mut stars, _, _) = get_stars_from_image(
+        &img_u8, noise_estimate, args.sigma, args.max_size, args.binning,
+        /*return_binned_image=*/false);
     let elapsed = star_extraction_start.elapsed();
     info!("WxH: {}x{}; noise level {}", width, height, noise_estimate);
     info!("Star extraction found {} stars in {:?}", stars.len(), elapsed);
