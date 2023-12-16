@@ -16,7 +16,8 @@
 //! * Simple function call interface with few parameters aside from the input
 //!   image.
 //! * Fast! On a Raspberry Pi 4B, the execution time per 1M image pixels is
-//!   around 5ms, even when several dozen stars are present in the image.
+//!   usually less than 10ms, even when several dozen stars are present in the
+//!   image.
 //!
 //! # Intended applications
 //!
@@ -64,8 +65,7 @@
 //! pixels. StarGate can thus be confused when stars are too closely spaced, or
 //! a star is close to a hot pixel. Such situations will usually cause closely
 //! spaced stars to fail to be detected. Note that for applications such as
-//! plate solving, this is probably for the better. A star that is rejected
-//! because it is near a hot pixel is a rare misfortune that we accept.
+//! plate solving, this is probably for the better.
 //!
 //! ## Imaging requirements
 //!
@@ -77,13 +77,13 @@
 //!   bright star is overexposed to a degree that it bleeds into too many
 //!   adjacent pixels, StarGate will reject the bright star.
 //! * Pixel scale and focusing are crucial:
-//!   * If star images are too extended w.r.t. the pixel grid, StarGate will not
+//!   * If star images are too extended w.r.t. the pixel grid, StarGate might not
 //!     detect the stars. You'll either need to tighten the focus or use the pixel
 //!     binning option when calling [get_stars_from_image()].
-//!   * If pixels are too large w.r.t. the stars' images, StarGate will
-//!     mis-classify many stars as hot pixels. A simple remedy is to slightly
-//!     defocus such that stars occupy a central peak pixel with a bit of spread
-//!     into immediately adjacent pixels.
+//!   * If stars are too small w.r.t. the pixel grid, StarGate might
+//!     mis-classify stars as hot pixels. A simple remedy is to slightly defocus
+//!     causing stars to occupy a central peak pixel with a bit of spread into
+//!     immediately adjacent pixels.
 //! * StarGate does not tolerate more than maybe a single pixel of motion blur.
 //!
 //! ## Centroid estimation
@@ -110,7 +110,7 @@
 //! * Lens pincushion and/or barrel distortions can cause reported star positions
 //!   to deviate from their true positions. StarGate reports star centroids in
 //!   the image's x/y coordinates; it is up to the application to apply any needed
-//!   lens distortion corrections.
+//!   lens distortion corrections when doing astrometry (e.g. plate solving).
 
 use std::cmp;
 use std::collections::hash_map::HashMap;
@@ -1152,6 +1152,7 @@ pub struct RegionOfInterestSummary {
 ///
 /// # Panics
 /// The `roi` must exclude the three leftmost and three rightmost image columns.
+/// The `roi` must exclude the three top and three bottom image rows.
 pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
                                     noise_estimate: f32, sigma: f32)
                                     -> RegionOfInterestSummary {
@@ -1168,9 +1169,18 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
     let gate_rightmost = roi.right() + 4;  // One past.
     assert!(gate_leftmost >= 0);
     assert!(gate_rightmost <= width as i32);
+    // We also need top/bottom margin to allow centroiding.
+    let top: i32 = roi.top() as i32 - 3;
+    let bottom = roi.bottom() + 4;  // One past.
+    assert!(top >= 0);
+    assert!(bottom <= height as i32);
     let image_pixels: &Vec<u8> = image.as_raw();
 
     let mut histogram: [u32; 256] = [0_u32; 256];
+
+    // We'll replace hot image pixels and do centroiding in the cleaned up
+    // image.
+    let mut cleaned_image = image.clone();
 
     let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate) as i16, 2);
     let sigma_noise_1_5 = cmp::max((1.5 * sigma * noise_estimate) as i16, 1);
@@ -1186,6 +1196,8 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
             let (pixel_value, _result_type) =
                 gate_star_1d(gate, sigma_noise_2, sigma_noise_1_5,
                              /*detect_hot_pixels=*/true);
+            cleaned_image.put_pixel(center_x as u32, rownum as u32,
+                                    Luma::<u8>([pixel_value]));
             histogram[pixel_value as usize] += 1;
             if pixel_value > peak_val {
                 peak_x = center_x;
@@ -1198,10 +1210,10 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
 
     // Apply centroiding to get sub-pixel resolution for peak_x/y.
     let bounding_box = Rect::at(peak_x - 3, peak_y - 3).of_size(7, 7);
-    let moments = compute_moments(&image, &bounding_box);
+    let moments = compute_moments(&cleaned_image, &bounding_box);
 
     debug!("ROI processing completed in {:?}", process_roi_start.elapsed());
-    RegionOfInterestSummary{histogram, 
+    RegionOfInterestSummary{histogram,
                             peak_x: moments.centroid_x,
                             peak_y: moments.centroid_y}
 }
@@ -1920,8 +1932,14 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_summarize_region_of_interest_left_edge() {
-        let roi = Rect::at(2, 0).of_size(3, 2);
+        let roi = Rect::at(2, 3).of_size(3, 2);
         let image_9x9 = gray_image!(
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
             9,  9,  9,  9,  9,  9,  9,  9,  9;
             9,  9,  9,  9,  9,  9,  9,  9,  9);
         // Cannot give ROI too close to left edges.
@@ -1932,8 +1950,14 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_summarize_region_of_interest_right_edge() {
-        let roi = Rect::at(4, 0).of_size(3, 2);
+        let roi = Rect::at(4, 3).of_size(3, 2);
         let image_9x9 = gray_image!(
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
             9,  9,  9,  9,  9,  9,  9,  9,  9;
             9,  9,  9,  9,  9,  9,  9,  9,  9);
         // Cannot give ROI too close to right edges.
@@ -1943,12 +1967,18 @@ mod tests {
 
     #[test]
     fn test_summarize_region_of_interest_good_edges() {
-        let roi = Rect::at(3, 0).of_size(3, 2);
+        let roi = Rect::at(3, 3).of_size(3, 2);
         // 80 is a hot pixel, is replaced by interpolation of its left
         // and right neighbors.
         let image_9x9 = gray_image!(
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
             9,  9,  9,  7,  80,  9, 9,  9,  9;
-            9,  9,  9,  11, 20, 32, 10,  9,  9);
+            9,  9,  9,  11, 20, 32, 10, 9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9);
         // ROI is correct distance from left+right edges.
         let roi_summary = summarize_region_of_interest(
             &image_9x9, &roi, 1.0, 5.0);
@@ -1959,8 +1989,10 @@ mod tests {
         assert_eq!(roi_summary.histogram[20], 1);
         assert_eq!(roi_summary.histogram[32], 1);
         // The hot pixel is not the peak.
-        assert_eq!(roi_summary.peak_x, 5);
-        assert_eq!(roi_summary.peak_y, 1);
+        assert_abs_diff_eq!(roi_summary.peak_x,
+                            5.43, epsilon = 0.01);
+        assert_abs_diff_eq!(roi_summary.peak_y,
+                            4.52, epsilon = 0.01);
     }
 
 }  // mod tests.
