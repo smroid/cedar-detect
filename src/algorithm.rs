@@ -326,19 +326,20 @@ struct CandidateFrom1D {
 //     satisfying other criteria.
 // `detect_hot_pixels` Determines whether hot pixel detection/substitution is
 //     done.
-// `create_binned_image` If true, a 2x2 binning of `image` is returned. Note that
-//     hot pixels are replaced during the binning process. Binning is by
+// `create_binned_image10` If true, a 2x2 binning of `image` is returned. Note
+//     that hot pixels are replaced during the binning process. Binning is by
 //     summing, and so the result pixels are 2 bits wider than the input.
-// `return_8_bit` If true, a 2x2 binning of `image` is returned. Note that hot
-//     pixels are replaced during the binning process. For binning is by
-//     averaging, so the result pixels are 8 bits. Note that is OK for this to
-//     be true if `create_binned_image` is false.
+// `create_binned_image8` If true, a 2x2 binning of `image` is returned. Note
+//     that hot pixels are replaced during the binning process. For binning is
+//     by averaging, so the result pixels are 8 bits. Note that is OK for this
+//     to be true if `create_binned_image10` is false.
+
 // Returns:
 // Vec<CandidateFrom1D>: the identifed star candidates, in raster scan order.
 // i32: count of hot pixels detected.
-// Option<Gray16Image>: if `create_binned_image` is true, the 10 bit binned
+// Option<Gray16Image>: if `create_binned_image10` is true, the 10 bit binned
 //   image is returned here.
-// Option<GrayImage>: if `return_8_bit` is true, the 8 bit binned image is
+// Option<GrayImage>: if `create_binned_image8` is true, the 8 bit binned image is
 //   returned here.
 //
 // P: u8 (original) or u16 (2x2 binned).
@@ -346,9 +347,12 @@ fn scan_image_for_candidates<P: Primitive + std::fmt::Debug>(
     image: &ImageBuffer<Luma<P>, Vec<P>>,
     noise_estimate: f32, sigma: f32,
     detect_hot_pixels: bool,
-    create_binned_image: bool, return_8_bit: bool)
-    -> (Vec<CandidateFrom1D>, /*hot_pixel_count*/i32,
-        Option<Gray16Image>, Option<GrayImage>)
+    create_binned_image10: bool,
+    create_binned_image8: bool)
+    -> (Vec<CandidateFrom1D>,
+        /*hot_pixel_count*/i32,
+        Option<Gray16Image>,
+        Option<GrayImage>)
 where u16: From<P>
 {
     let row_scan_start = Instant::now();
@@ -361,15 +365,20 @@ where u16: From<P>
     let sigma_noise_1_5 = cmp::max((1.5 * sigma * noise_estimate + 0.5) as i16, 1);
 
     let (binned_width, binned_height) = (width / 2, height / 2);
-    let mut binned_image_data = Vec::<u16>::new();
-    if create_binned_image {
+    let num_binned_pixels = binned_width * binned_height;
+    let mut binned_image10_data = Vec::<u16>::new();
+    let mut binned_image8_data = Vec::<u8>::new();
+    if create_binned_image10 || create_binned_image8 {
         // Allocate uninitialized storage to receive the 2x2 binned image data.
-        let num_binned_pixels = binned_width * binned_height;
-        binned_image_data.reserve(num_binned_pixels as usize);
-        unsafe { binned_image_data.set_len(num_binned_pixels) }
+        binned_image10_data.reserve(num_binned_pixels as usize);
+        unsafe { binned_image10_data.set_len(num_binned_pixels) }
+        if create_binned_image8 {
+            binned_image8_data.reserve(num_binned_pixels as usize);
+            unsafe { binned_image8_data.set_len(num_binned_pixels) }
+        }
     }
     // Allocate accumulator row for binning. TODO(smr): can we accumulate directly
-    // into binned_image_data (zero-initialized of course)?
+    // into binned_image10_data (zero-initialized of course)?
     let mut binned_row = Vec::<u16>::new();
     binned_row.resize(binned_width, 0);
     let binned_slice: &mut[u16] = &mut binned_row[0..binned_width];
@@ -379,10 +388,10 @@ where u16: From<P>
         let row_pixels: &[P] = &image_pixels.as_slice()
             [rownum * width .. (rownum+1) * width];
         let mut center_x = 2_usize;
-        // We duplicate the loops, slightly different according to
-        // create_binned_image. We do this to avoid having a conditional on
-        // create_binned_image in the inner loop.
-        if create_binned_image {
+        // We duplicate the loops, slightly different according to whether we
+        // are binning. We do this to avoid having a conditional on binning
+        // in the inner loop.
+        if create_binned_image10 || create_binned_image8 {
             binned_slice[0] += u16::from(row_pixels[0]);
             binned_slice[0] += u16::from(row_pixels[1]);
             binned_slice[1] += u16::from(row_pixels[2]);
@@ -412,12 +421,20 @@ where u16: From<P>
             }
             if rownum & 1 != 0 {
                 let binned_rownum = rownum / 2;
-                let binned_image_row: &mut[u16] = &mut binned_image_data.as_mut_slice()
+                let binned_image10_row: &mut[u16] = &mut binned_image10_data.as_mut_slice()
                     [binned_rownum * binned_width .. (binned_rownum+1) * binned_width];
-                // TODO(smr): is there a library primitive for these?
+                // TODO(smr): is there a library primitive for this?
                 for x in 0..binned_width {
-                    binned_image_row[x] = binned_slice[x];
+                    binned_image10_row[x] = binned_slice[x];
                     binned_slice[x] = 0;
+                }
+                if create_binned_image8 {
+                    let binned_image8_row: &mut[u8] = &mut binned_image8_data.as_mut_slice()
+                        [binned_rownum * binned_width .. (binned_rownum+1) * binned_width];
+                    // TODO(smr): is there a library primitive for this?
+                    for x in 0..binned_width {
+                        binned_image8_row[x] = ((binned_image10_row[x] + 2) / 4) as u8;
+                    }
                 }
             }
         } else {
@@ -439,15 +456,19 @@ where u16: From<P>
     }
     debug!("Image scan found {} candidates and {} hot pixels in {:?}",
           candidates.len(), hot_pixel_count, row_scan_start.elapsed());
-    if create_binned_image {
-        (candidates,
-         hot_pixel_count,
-         Some(Gray16Image::from_raw(binned_width as u32, binned_height as u32,
-                                 binned_image_data).unwrap()),
-        )
-    } else {
-        (candidates, hot_pixel_count, None)
+    let mut binned10_result: Option<Gray16Image> = None;
+    let mut binned8_result: Option<GrayImage> = None;
+    if create_binned_image10 {
+        binned10_result = Some(Gray16Image::from_raw(
+            binned_width as u32, binned_height as u32,
+            binned_image10_data).unwrap());
     }
+    if create_binned_image8 {
+        binned8_result = Some(GrayImage::from_raw(
+            binned_width as u32, binned_height as u32,
+            binned_image8_data).unwrap());
+    }
+    (candidates, hot_pixel_count, binned10_result, binned8_result)
 }
 
 #[derive(Debug)]
@@ -1025,7 +1046,7 @@ fn stats_for_histogram(histogram: &[u32; 1024])
 /// i32: The number of hot pixels seen. See implementation for more information
 /// about hot pixels.
 ///
-/// Option<GrayImage>: if `create_binned_image` is true, the 2x2 binning of `image`
+/// Option<GrayImage>: if `return_binned_image` is true, the 2x2 binning of `image`
 ///   is returned.
 pub fn get_stars_from_image(
     image: &GrayImage,
@@ -1038,12 +1059,14 @@ pub fn get_stars_from_image(
     let noise_estimate8 = f32::max(noise_estimate, 0.5);
 
     let mut binned_image10: Option<Gray16Image> = None;
+    let mut binned_image8: Option<GrayImage> = None;
     let mut hot_pixel_count = 0;
     if use_binned_image || return_binned_image {
-        (_, hot_pixel_count, binned_image10) =
+        (_, hot_pixel_count, binned_image10, binned_image8) =
             scan_image_for_candidates(image, noise_estimate8, sigma,
                                       /*detect_hot_pixels=*/true,
-                                      /*create_binned_image=*/true);
+                                      /*create_binned_image10=*/true,
+                                      /*create_binned_image8=*/return_binned_image);
     }
 
     let mut stars = Vec::<StarDescription>::new();
@@ -1052,11 +1075,12 @@ pub fn get_stars_from_image(
             &binned_image10.as_ref().unwrap());
         // Use a higher noise floor for 10-bit binned image.
         let noise_estimate10 = f32::max(binned_noise_estimate, 1.5);
-        let (candidates, _, _) =
+        let (candidates, _, _, _) =
             scan_image_for_candidates(&binned_image10.as_ref().unwrap(),
                                       noise_estimate10, sigma,
                                       /*detect_hot_pixels=*/false,
-                                      /*create_binned_image=*/false);
+                                      /*create_binned_image10=*/false,
+                                      /*create_binned_image8=*/false);
         for blob in form_blobs_from_candidates(candidates) {
             match gate_star_2d(&blob, &binned_image10.as_ref().unwrap(),
                                /*full_res_image=*/image,
@@ -1068,10 +1092,11 @@ pub fn get_stars_from_image(
             }
         }
     } else {
-        let (candidates, local_hot_pixel_count, _) =
+        let (candidates, local_hot_pixel_count, _, _) =
             scan_image_for_candidates(image, noise_estimate8, sigma,
                                       /*detect_hot_pixels=*/true,
-                                      /*create_binned_image=*/false);
+                                      /*create_binned_image10=*/false,
+                                      /*create_binned_image8=*/false);
         hot_pixel_count = local_hot_pixel_count;
         for blob in form_blobs_from_candidates(candidates) {
             match gate_star_2d(&blob, image,
@@ -1085,29 +1110,7 @@ pub fn get_stars_from_image(
         }
     }
 
-    if return_binned_image {
-        let img10 = binned_image10.unwrap();
-        let (width, height) = img10.dimensions();
-        // Convert img10 to 8 bits by dividing each pixel value by 4.
-        let mut out_image_data = Vec::<u8>::new();
-        // Allocate uninitialized storage to receive the divided-by-4 image data.
-        let num_binned_pixels = (width * height) as usize;
-        out_image_data.reserve(num_binned_pixels);
-        unsafe { out_image_data.set_len(num_binned_pixels) }
-
-        let in_image_slice: &[u16] =
-            &img10.as_raw().as_slice()[0 .. num_binned_pixels];
-        let out_image_slice: &mut[u8] =
-            &mut out_image_data.as_mut_slice()[0 .. num_binned_pixels];
-        // TODO(smr): is there a library primitive for this?
-        for x in 0..num_binned_pixels {
-            out_image_slice[x] = (in_image_slice[x] / 4) as u8;
-        }
-        (stars, hot_pixel_count,
-         Some(GrayImage::from_raw(width, height, out_image_data).unwrap()))
-    } else {
-        (stars, hot_pixel_count, None)
-    }
+    (stars, hot_pixel_count, binned_image8)
 }
 
 /// Summarizes an image region of interest. The pixel values used are not
