@@ -339,8 +339,8 @@ struct CandidateFrom1D {
 // i32: count of hot pixels detected.
 // Option<Gray16Image>: if `create_binned_image10` is true, the 10 bit binned
 //   image is returned here.
-// Option<GrayImage>: if `create_binned_image8` is true, the 8 bit binned image is
-//   returned here.
+// Option<GrayImage>: if `create_binned_image8` is true, the 8 bit binned image
+//   is returned here.
 //
 // P: u8 (original) or u16 (2x2 binned).
 fn scan_image_for_candidates<P: Primitive + std::fmt::Debug>(
@@ -433,7 +433,7 @@ where u16: From<P>
                         [binned_rownum * binned_width .. (binned_rownum+1) * binned_width];
                     // TODO(smr): is there a library primitive for this?
                     for x in 0..binned_width {
-                        binned_image8_row[x] = ((binned_image10_row[x] + 2) / 4) as u8;
+                        binned_image8_row[x] = (binned_image10_row[x] / 4) as u8;
                     }
                 }
             }
@@ -1308,7 +1308,7 @@ mod tests {
 
     #[test]
     fn test_stats_for_histogram() {
-        let mut histogram = [0_u32; 256];
+        let mut histogram = [0_u32; 1024];
         histogram[10] = 2;
         histogram[20] = 2;
         let (mean, stddev, median) = stats_for_histogram(&histogram);
@@ -1490,56 +1490,68 @@ mod tests {
 
     #[test]
     fn test_create_binned_image() {
-        // Test the create_binned_image aspect of scan_image_for_candidates().
+        // Test the create_binned_image10 aspect of scan_image_for_candidates().
         // Even dimensions, no hot pixel.
         let image_12x4 = gray_image!(
            10, 20, 30, 40, 50, 60, 70, 80, 90,100,110,120;
             2,  4,  6,  8, 10, 12, 14, 16, 18, 20, 22, 24;
             0,  0,  0,  1,  0,  1,  1,  0,  1,  1,  1,  1;
             0,  0,  0,  0,  1,  0,  1,  1,  1,  1,  1,  3);
-        let (candidates, hot_pixel_count, binned_image) =
+        let (candidates, hot_pixel_count, binned_image10, _) =
             scan_image_for_candidates(&image_12x4, 1.0, 8.0,
                                       /*detect_hot_pixels=*/true,
-                                      /*create_binned_image=*/true);
+                                      /*create_binned_image10=*/true,
+                                      /*create_binned_image8=*/false);
         assert_eq!(candidates.len(), 0);
         assert_eq!(hot_pixel_count, 0);
-        let binned_image = binned_image.unwrap();
-        assert_eq!(binned_image.width(), 6);
-        assert_eq!(binned_image.height(), 2);
-        let expected_binned = gray_image!(
-            9, 21, 33, 45, 57, 69;
-            0,  0,  1,  1,  1,  2);
-        assert_eq!(binned_image, expected_binned);
+        let binned_image10 = binned_image10.unwrap();
+        assert_eq!(binned_image10.width(), 6);
+        assert_eq!(binned_image10.height(), 2);
+        let expected_binned10 = gray_image!(type: u16,
+            36,  84, 132, 180, 228, 276;
+             0,   1,   2,   3,   4,   6);
+        assert_eq!(binned_image10, expected_binned10);
 
         // Odd dimensions, with hot pixel.
         let image_11x3 = gray_image!(
            10, 20, 30, 40, 50, 60, 70, 80, 90,100,110;
             2,  4,  6,250, 10, 12, 14, 16, 18, 20, 22;
             0,  0,  0,  1,  0,  1,  1,  0,  1,  1,  1);
-        let (candidates, hot_pixel_count, binned_image) =
+        let (candidates, hot_pixel_count, binned_image10, _) =
             scan_image_for_candidates(&image_11x3, 1.0, 8.0,
                                       /*detect_hot_pixels=*/true,
-                                      /*create_binned_image=*/true);
+                                      /*create_binned_image10=*/true,
+                                      /*create_binned_image8=*/false);
         assert_eq!(candidates.len(), 0);
         assert_eq!(hot_pixel_count, 1);
-        let binned_image = binned_image.unwrap();
-        assert_eq!(binned_image.width(), 5);
-        assert_eq!(binned_image.height(), 1);
-        let expected_binned = gray_image!(9, 21, 33, 45, 57);
-        assert_eq!(binned_image, expected_binned);
+        let binned_image10 = binned_image10.unwrap();
+        assert_eq!(binned_image10.width(), 5);
+        assert_eq!(binned_image10.height(), 1);
+        let expected_binned10 = gray_image!(type: u16,
+                                            36,  84, 132, 180, 228);
+        assert_eq!(binned_image10, expected_binned10);
 
-        // Same, except with hot pixel detection turned off.
-        let (candidates, hot_pixel_count, binned_image) =
+        // Same, except with hot pixel detection turned off. Also request
+        // 8 bit version of binned image.
+        let (candidates, hot_pixel_count, binned_image10, binned_image8) =
             scan_image_for_candidates(&image_11x3, 1.0, 8.0,
                                       /*detect_hot_pixels=*/false,
-                                      /*create_binned_image=*/true);
+                                      /*create_binned_image10=*/true,
+                                      /*create_binned_image8=*/true);
         assert_eq!(candidates.len(), 1);
         assert_eq!(hot_pixel_count, 0);
-        let binned_image = binned_image.unwrap();
-        assert_eq!(binned_image.width(), 5);
-        assert_eq!(binned_image.height(), 1);
-        let expected_binned = gray_image!(9, 82, 33, 45, 57);
-        assert_eq!(binned_image, expected_binned);
+        let binned_image10 = binned_image10.unwrap();
+        assert_eq!(binned_image10.width(), 5);
+        assert_eq!(binned_image10.height(), 1);
+        let expected_binned10 = gray_image!(type: u16,
+                                            36, 326, 132, 180, 228);
+        assert_eq!(binned_image10, expected_binned10);
+
+        let binned_image8 = binned_image8.unwrap();
+        assert_eq!(binned_image8.width(), 5);
+        assert_eq!(binned_image8.height(), 1);
+        let expected_binned8 = gray_image!(9, 81, 33, 45, 57);
+        assert_eq!(binned_image8, expected_binned8);
     }
 
     #[test]
@@ -1641,18 +1653,18 @@ mod tests {
         blob.candidates.push(CandidateFrom1D{x: 3, y: 3});
         blob.candidates.push(CandidateFrom1D{x: 5, y: 5});
         // 3x3 is too big.
-        match gate_star_2d(&blob, &image_9x9, None, 1.0, 6.0, true,
+        match gate_star_2d(&blob, &image_9x9, &image_9x9, 1.0, 6.0, true,
                            /*max_width=*/3, /*max_height=*/2) {
             Some(_star_description) => panic!("Expected rejection"),
             None => ()
         }
-        match gate_star_2d(&blob, &image_9x9, None, 1.0, 6.0, true,
+        match gate_star_2d(&blob, &image_9x9, &image_9x9, 1.0, 6.0, true,
                            /*max_width=*/2, /*max_height=*/3) {
             Some(_star_description) => panic!("Expected rejection"),
             None => ()
         }
         // We allow a 3x3 blob here.
-        match gate_star_2d(&blob, &image_9x9, None, 1.0, 6.0, true,
+        match gate_star_2d(&blob, &image_9x9, &image_9x9, 1.0, 6.0, true,
                            /*max_width=*/3, /*max_height=*/3) {
             Some(_star_description) => (),
             None => panic!("Expected candidate")
@@ -1673,35 +1685,35 @@ mod tests {
         9,  9,  9,  9,  9,  9,  9);
         // Make 1x1 blob, but too far to the left.
         blob.candidates.push(CandidateFrom1D{x: 2, y: 3});
-        match gate_star_2d(&blob, &image_7x7, None, 1.0, 6.0, true, 3, 3) {
+        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1.0, 6.0, true, 3, 3) {
             Some(_star_description) => panic!("Expected rejection"),
             None => ()
         }
         // Too far to right.
         blob.candidates.clear();
         blob.candidates.push(CandidateFrom1D{x: 4, y: 3});
-        match gate_star_2d(&blob, &image_7x7, None, 1.0, 6.0, true, 3, 3) {
+        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1.0, 6.0, true, 3, 3) {
             Some(_star_description) => panic!("Expected rejection"),
             None => ()
         }
         // Too high.
         blob.candidates.clear();
         blob.candidates.push(CandidateFrom1D{x: 3, y: 2});
-        match gate_star_2d(&blob, &image_7x7, None, 1.0, 6.0, true, 3, 3) {
+        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1.0, 6.0, true, 3, 3) {
             Some(_star_description) => panic!("Expected rejection"),
             None => ()
         }
         // Too low.
         blob.candidates.clear();
         blob.candidates.push(CandidateFrom1D{x: 3, y: 4});
-        match gate_star_2d(&blob, &image_7x7, None, 1.0, 6.0, true, 3, 3) {
+        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1.0, 6.0, true, 3, 3) {
             Some(_star_description) => panic!("Expected rejection"),
             None => ()
         }
         // Just right!
         blob.candidates.clear();
         blob.candidates.push(CandidateFrom1D{x: 3, y: 3});
-        match gate_star_2d(&blob, &image_7x7, None, 1.0, 6.0, true, 3, 3) {
+        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1.0, 6.0, true, 3, 3) {
             Some(_star_description) => (),
             None => panic!("Expected candidate"),
         }
@@ -1725,13 +1737,13 @@ mod tests {
         blob.candidates.push(CandidateFrom1D{x: 3, y: 3});
         blob.candidates.push(CandidateFrom1D{x: 5, y: 5});
         // Center of core is less bright than outer core.
-        match gate_star_2d(&blob, &image_9x9, None, 1.0, 6.0, true, 3, 3) {
+        match gate_star_2d(&blob, &image_9x9, &image_9x9, 1.0, 6.0, true, 3, 3) {
             Some(_star_description) => panic!("Expected rejection"),
             None => (),
         }
         // Make center bright enough.
         image_9x9.put_pixel(4, 4, Luma::<u8>([20]));
-        match gate_star_2d(&blob, &image_9x9, None, 1.0, 6.0, true, 3, 3) {
+        match gate_star_2d(&blob, &image_9x9, &image_9x9, 1.0, 6.0, true, 3, 3) {
             Some(_star_description) => (),
             None => panic!("Expected candidate"),
         }
@@ -1752,13 +1764,13 @@ mod tests {
         8,  8,  8,  8,  8,  8,  8);
         // 1x1 core is less bright than neighbor average. Note that the
         // neighbor corners are excluded.
-        match gate_star_2d(&blob, &image_7x7, None, 1.0, 6.0, true, 3, 3) {
+        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1.0, 6.0, true, 3, 3) {
             Some(_star_description) => panic!("Expected rejection"),
             None => (),
         }
         // Make center bright enough.
         image_7x7.put_pixel(3, 3, Luma::<u8>([14]));
-        match gate_star_2d(&blob, &image_7x7, None, 1.0, 6.0, true, 3, 3) {
+        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1.0, 6.0, true, 3, 3) {
             Some(_star_description) => (),
             None => panic!("Expected candidate"),
         }
@@ -1778,13 +1790,13 @@ mod tests {
         8, 14, 14, 14, 14, 14,  8;
         8,  8,  8,  8,  8,  8,  8);
         // 1x1 core is not brighter than margin average.
-        match gate_star_2d(&blob, &image_7x7, None, 1.0, 6.0, true, 3, 3) {
+        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1.0, 6.0, true, 3, 3) {
             Some(_star_description) => panic!("Expected rejection"),
             None => (),
         }
         // Make center bright enough.
         image_7x7.put_pixel(3, 3, Luma::<u8>([15]));
-        match gate_star_2d(&blob, &image_7x7, None, 1.0, 6.0, true, 3, 3) {
+        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1.0, 6.0, true, 3, 3) {
             Some(_star_description) => (),
             None => panic!("Expected candidate"),
         }
@@ -1804,13 +1816,13 @@ mod tests {
         9, 10, 10, 10, 10, 10,  9;
         9,  9,  9,  9,  9,  9,  9);
         // Perimeter has an anomalously bright pixel.
-        match gate_star_2d(&blob, &image_7x7, None, 1.0, 6.0, true, 3, 3) {
+        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1.0, 6.0, true, 3, 3) {
             Some(_star_description) => panic!("Expected rejection"),
             None => (),
         }
         // Repair the perimeter.
         image_7x7.put_pixel(0, 2, Luma::<u8>([12]));
-        match gate_star_2d(&blob, &image_7x7, None, 1.0, 6.0, true, 3, 3) {
+        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1.0, 6.0, true, 3, 3) {
             Some(_star_description) => (),
             None => panic!("Expected candidate"),
         }
@@ -1830,13 +1842,13 @@ mod tests {
         8,  9,  9,  9,  9,  9,  8;
         8,  8,  8,  8,  8,  8,  8);
         // 1x1 core is not brighter enough than perimeter average.
-        match gate_star_2d(&blob, &image_7x7, None, 1.0, 6.0, true, 3, 3) {
+        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1.0, 6.0, true, 3, 3) {
             Some(_star_description) => panic!("Expected rejection"),
             None => (),
         }
         // Make center bright enough.
         image_7x7.put_pixel(3, 3, Luma::<u8>([14]));
-        match gate_star_2d(&blob, &image_7x7, None, 1.0, 6.0, true, 3, 3) {
+        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1.0, 6.0, true, 3, 3) {
             Some(_star_description) => (),
             None => panic!("Expected candidate"),
         }
@@ -1857,12 +1869,12 @@ mod tests {
         8,  8,  8,  8,  8,  8,  8);
         // Neighbor ring is not brighter enough compared to core (core is a hot
         // pixel).
-        match gate_star_2d(&blob, &image_7x7, None, 1.0, 6.0, true, 3, 3) {
+        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1.0, 6.0, true, 3, 3) {
             Some(_star_description) => panic!("Expected rejection"),
             None => (),
         }
         // Same, but turn off hot pixel detection.
-        match gate_star_2d(&blob, &image_7x7, None, 1.0, 6.0,
+        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1.0, 6.0,
                            /*detect_hot_pixels=*/false, 3, 3) {
             Some(_star_description) => (),
             None => panic!("Expected candidate"),
@@ -1870,14 +1882,14 @@ mod tests {
         // Enable hot pixel detection, and make neighbors bright enough.
         image_7x7.put_pixel(2, 2, Luma::<u8>([12]));
         image_7x7.put_pixel(3, 2, Luma::<u8>([12]));
-        match gate_star_2d(&blob, &image_7x7, None, 1.0, 6.0, true, 3, 3) {
+        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1.0, 6.0, true, 3, 3) {
             Some(_star_description) => (),
             None => panic!("Expected candidate"),
         }
     }
 
     #[test]
-    fn test_create_star_description() {
+    fn test_compute_moments() {
         let image_7x7 = gray_image!(
         9,  9,  9,   9,  9,  9,  9;
         9, 10, 10,  10, 10, 10,  9;
@@ -1887,8 +1899,7 @@ mod tests {
         9, 10, 10,  10, 10, 10,  9;
         9,  9,  9,   9,  9,  9,  9);
         let neighbors = Rect::at(2, 2).of_size(3, 3);
-        let star_description = create_star_description(
-            &image_7x7, None, &neighbors);
+        let star_description = compute_moments(&image_7x7, &neighbors);
         assert_abs_diff_eq!(star_description.centroid_x,
                             3.53, epsilon = 0.01);
         assert_abs_diff_eq!(star_description.centroid_y,
