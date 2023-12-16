@@ -327,19 +327,28 @@ struct CandidateFrom1D {
 // `detect_hot_pixels` Determines whether hot pixel detection/substitution is
 //     done.
 // `create_binned_image` If true, a 2x2 binning of `image` is returned. Note that
-//     hot pixels are replaced during the binning process.
+//     hot pixels are replaced during the binning process. Binning is by
+//     summing, and so the result pixels are 2 bits wider than the input.
+// `return_8_bit` If true, a 2x2 binning of `image` is returned. Note that hot
+//     pixels are replaced during the binning process. For binning is by
+//     averaging, so the result pixels are 8 bits. Note that is OK for this to
+//     be true if `create_binned_image` is false.
 // Returns:
 // Vec<CandidateFrom1D>: the identifed star candidates, in raster scan order.
 // i32: count of hot pixels detected.
-// Option<Gray16Image>: if `create_binned_image` is true, the 2x2 binning of `image`
-//   is returned. Binning is by summing, and so the result pixels are 2 bits
-//   wider than the input.
+// Option<Gray16Image>: if `create_binned_image` is true, the 10 bit binned
+//   image is returned here.
+// Option<GrayImage>: if `return_8_bit` is true, the 8 bit binned image is
+//   returned here.
+//
 // P: u8 (original) or u16 (2x2 binned).
 fn scan_image_for_candidates<P: Primitive + std::fmt::Debug>(
     image: &ImageBuffer<Luma<P>, Vec<P>>,
     noise_estimate: f32, sigma: f32,
-    detect_hot_pixels: bool, create_binned_image: bool)
-    -> (Vec<CandidateFrom1D>, /*hot_pixel_count*/i32, Option<Gray16Image>,)
+    detect_hot_pixels: bool,
+    create_binned_image: bool, return_8_bit: bool)
+    -> (Vec<CandidateFrom1D>, /*hot_pixel_count*/i32,
+        Option<Gray16Image>, Option<GrayImage>)
 where u16: From<P>
 {
     let row_scan_start = Instant::now();
@@ -1028,10 +1037,10 @@ pub fn get_stars_from_image(
     // crushed to black; use a minimum noise value.
     let noise_estimate8 = f32::max(noise_estimate, 0.5);
 
-    let mut binned_image: Option<Gray16Image> = None;
+    let mut binned_image10: Option<Gray16Image> = None;
     let mut hot_pixel_count = 0;
     if use_binned_image || return_binned_image {
-        (_, hot_pixel_count, binned_image) =
+        (_, hot_pixel_count, binned_image10) =
             scan_image_for_candidates(image, noise_estimate8, sigma,
                                       /*detect_hot_pixels=*/true,
                                       /*create_binned_image=*/true);
@@ -1040,16 +1049,16 @@ pub fn get_stars_from_image(
     let mut stars = Vec::<StarDescription>::new();
     if use_binned_image {
         let binned_noise_estimate = estimate_noise_from_image(
-            &binned_image.as_ref().unwrap());
+            &binned_image10.as_ref().unwrap());
         // Use a higher noise floor for 10-bit binned image.
         let noise_estimate10 = f32::max(binned_noise_estimate, 1.5);
         let (candidates, _, _) =
-            scan_image_for_candidates(&binned_image.as_ref().unwrap(),
+            scan_image_for_candidates(&binned_image10.as_ref().unwrap(),
                                       noise_estimate10, sigma,
                                       /*detect_hot_pixels=*/false,
                                       /*create_binned_image=*/false);
         for blob in form_blobs_from_candidates(candidates) {
-            match gate_star_2d(&blob, &binned_image.as_ref().unwrap(),
+            match gate_star_2d(&blob, &binned_image10.as_ref().unwrap(),
                                /*full_res_image=*/image,
                                noise_estimate10, sigma,
                                /*detect_hot_pixels=*/false,
@@ -1077,7 +1086,7 @@ pub fn get_stars_from_image(
     }
 
     if return_binned_image {
-        let img10 = binned_image.unwrap();
+        let img10 = binned_image10.unwrap();
         let (width, height) = img10.dimensions();
         // Convert img10 to 8 bits by dividing each pixel value by 4.
         let mut out_image_data = Vec::<u8>::new();
@@ -1187,8 +1196,7 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
     }
 
     debug!("ROI processing completed in {:?}", process_roi_start.elapsed());
-    RegionOfInterestSummary{histogram, peak_x, peak_y,
-    }
+    RegionOfInterestSummary{histogram, peak_x, peak_y}
 }
 
 #[cfg(test)]
