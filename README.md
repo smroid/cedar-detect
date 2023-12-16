@@ -18,7 +18,8 @@ Features:
 * Simple function call interface with few parameters aside from the input
   image.
 * Fast! On a Raspberry Pi 4B, the execution time per 1M image pixels is
-  around 5ms, even when several dozen stars are present in the image.
+  usually less than 10ms, even when several dozen stars are present in the
+  image.
 
 For more information, see the crate documentation in src/lib.rs.
 

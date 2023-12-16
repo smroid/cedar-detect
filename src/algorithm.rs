@@ -365,11 +365,11 @@ where u16: From<P>
     let sigma_noise_1_5 = cmp::max((1.5 * sigma * noise_estimate + 0.5) as i16, 1);
 
     let (binned_width, binned_height) = (width / 2, height / 2);
-    let num_binned_pixels = binned_width * binned_height;
     let mut binned_image10_data = Vec::<u16>::new();
     let mut binned_image8_data = Vec::<u8>::new();
     if create_binned_image10 || create_binned_image8 {
         // Allocate uninitialized storage to receive the 2x2 binned image data.
+        let num_binned_pixels = binned_width * binned_height;
         binned_image10_data.reserve(num_binned_pixels as usize);
         unsafe { binned_image10_data.set_len(num_binned_pixels) }
         if create_binned_image8 {
@@ -377,11 +377,6 @@ where u16: From<P>
             unsafe { binned_image8_data.set_len(num_binned_pixels) }
         }
     }
-    // Allocate accumulator row for binning. TODO(smr): can we accumulate directly
-    // into binned_image10_data (zero-initialized of course)?
-    let mut binned_row = Vec::<u16>::new();
-    binned_row.resize(binned_width, 0);
-    let binned_slice: &mut[u16] = &mut binned_row[0..binned_width];
 
     for rownum in 0..height {
         // Get the slice of image_pixels corresponding to this row.
@@ -392,6 +387,16 @@ where u16: From<P>
         // are binning. We do this to avoid having a conditional on binning
         // in the inner loop.
         if create_binned_image10 || create_binned_image8 {
+            if rownum == height-1 && height & 1 != 0 {
+                break;  // Skip final row on odd-height image when binning.
+            }
+            let binned_rownum = rownum / 2;
+            // Set up accumulator row for binning.
+            let binned_slice: &mut[u16] = &mut binned_image10_data.as_mut_slice()
+                [binned_rownum * binned_width .. (binned_rownum+1) * binned_width];
+            if rownum & 1 == 0 {
+                binned_slice.fill(0);
+            }
             binned_slice[0] += u16::from(row_pixels[0]);
             binned_slice[0] += u16::from(row_pixels[1]);
             binned_slice[1] += u16::from(row_pixels[2]);
@@ -421,17 +426,11 @@ where u16: From<P>
             }
             if rownum & 1 != 0 {
                 let binned_rownum = rownum / 2;
-                let binned_image10_row: &mut[u16] = &mut binned_image10_data.as_mut_slice()
-                    [binned_rownum * binned_width .. (binned_rownum+1) * binned_width];
-                // TODO(smr): is there a library primitive for this?
-                for x in 0..binned_width {
-                    binned_image10_row[x] = binned_slice[x];
-                    binned_slice[x] = 0;
-                }
                 if create_binned_image8 {
+                    let binned_image10_row: &mut[u16] = &mut binned_image10_data.as_mut_slice()
+                        [binned_rownum * binned_width .. (binned_rownum+1) * binned_width];
                     let binned_image8_row: &mut[u8] = &mut binned_image8_data.as_mut_slice()
                         [binned_rownum * binned_width .. (binned_rownum+1) * binned_width];
-                    // TODO(smr): is there a library primitive for this?
                     for x in 0..binned_width {
                         binned_image8_row[x] = (binned_image10_row[x] / 4) as u8;
                     }
@@ -1127,8 +1126,8 @@ pub struct RegionOfInterestSummary {
     /// unspecified which one's location is reported here. The application logic
     /// should use `histogram` to adjust exposure to avoid too many peak
     /// (saturated) pixels.
-    pub peak_x: i32,
-    pub peak_y: i32,
+    pub peak_x: f32,
+    pub peak_y: f32,
 }
 
 /// Gathers information from a region of interest of an image.
@@ -1158,7 +1157,6 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
                                     -> RegionOfInterestSummary {
     let process_roi_start = Instant::now();
 
-    // TODO(smr): apply centroiding to get sub-pixel resolution for peak_x/y.
     let mut peak_x = 0;
     let mut peak_y = 0;
     let mut peak_val = 0_u8;
@@ -1198,8 +1196,14 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
         }
     }
 
+    // Apply centroiding to get sub-pixel resolution for peak_x/y.
+    let bounding_box = Rect::at(peak_x - 3, peak_y - 3).of_size(7, 7);
+    let moments = compute_moments(&image, &bounding_box);
+
     debug!("ROI processing completed in {:?}", process_roi_start.elapsed());
-    RegionOfInterestSummary{histogram, peak_x, peak_y}
+    RegionOfInterestSummary{histogram, 
+                            peak_x: moments.centroid_x,
+                            peak_y: moments.centroid_y}
 }
 
 #[cfg(test)]
