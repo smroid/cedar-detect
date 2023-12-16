@@ -19,12 +19,11 @@ from multiprocessing import shared_memory
 import star_gate_pb2
 import star_gate_pb2_grpc
 
-def tiff_force_8bit(image):
-    if image.format == 'TIFF' and image.mode == 'I;16':
-        array = np.array(image)
-        normalized = (array.astype(np.uint16)) / 256
-        image = Image.fromarray(normalized.astype(np.uint8))
-    return image
+def extract_centroids(stub, image):
+    cr = star_gate_pb2.CentroidsRequest(
+        input_image=image, sigma=8.0, max_size=5, return_binned=False,
+        use_binned_for_star_candidates=True)
+    return stub.ExtractCentroids(cr)
 
 # Create instance and load default_database (built with max_fov=12 and the rest
 # as default).
@@ -42,12 +41,12 @@ USE_SHMEM = True
 
 # Path where test images are.
 path = Path('../test_data/')
-for impath in path.glob('*.tiff'):
+for impath in path.glob('*.jpg'):
     print('Solving for image at: ' + str(impath))
     with Image.open(str(impath)) as img:
+        img = img.convert(mode='L')
         (width, height) = (img.width, img.height)
-        img_u8 = tiff_force_8bit(img)
-        image = np.asarray(img_u8, dtype=np.uint8)
+        image = np.asarray(img, dtype=np.uint8)
 
         centroids_result = None
         rpc_duration_secs = None
@@ -68,11 +67,8 @@ for impath in path.glob('*.tiff'):
 
                 im = star_gate_pb2.Image(width=width, height=height,
                                          shmem_name=shmem.name)
-                cr = star_gate_pb2.CentroidsRequest(
-                    input_image=im, sigma=8.0, max_size=5, return_binned=False,
-                    use_binned_for_star_candidates=False)
                 rpc_start = precision_timestamp()
-                centroids_result = stub.ExtractCentroids(cr)
+                centroids_result = extract_centroids(stub, im)
                 rpc_duration_secs = precision_timestamp() - rpc_start
             finally:
                 shmem.close()
@@ -82,21 +78,23 @@ for impath in path.glob('*.tiff'):
             # gRPC request.
             im = star_gate_pb2.Image(width=width, height=height,
                                      image_data=image.tobytes())
-            cr = star_gate_pb2.CentroidsRequest(
-                input_image=im, sigma=8.0, max_size=5, return_binned=False,
-                use_binned_for_star_candidates=False)
             rpc_start = precision_timestamp()
-            centroids_result = stub.ExtractCentroids(cr)
+            centroids_result = extract_centroids(stub, im)
             rpc_duration_secs = precision_timestamp() - rpc_start
 
-        tetra_centroids = []  # List of (y, x).
-        for sc in centroids_result.star_candidates:
-            tetra_centroids.append((sc.centroid_position.y,
-                                    sc.centroid_position.x))
-        solved = t3.solve_from_centroids(tetra_centroids, (height, width))
-        algo_duration_secs = (centroids_result.algorithm_time.seconds +
-                              centroids_result.algorithm_time.nanos / 1e9)
-        print('Solution: %s. %.2fms in centroiding (%.2fms rpc overhead)' %
-              (str(solved),
-               rpc_duration_secs * 1000,
-               (rpc_duration_secs - algo_duration_secs) * 1000))
+        if len(centroids_result.star_candidates) == 0:
+            print('Found no stars!')
+        else:
+            tetra_centroids = []  # List of (y, x).
+            for sc in centroids_result.star_candidates:
+                tetra_centroids.append((sc.centroid_position.y,
+                                        sc.centroid_position.x))
+            solved = t3.solve_from_centroids(tetra_centroids, (height, width),
+                                             fov_estimate=11, match_max_error=0.005)
+            algo_duration_secs = (centroids_result.algorithm_time.seconds +
+                                  centroids_result.algorithm_time.nanos / 1e9)
+            print('Centroids: %s. Solution: %s. %.2fms in centroiding (%.2fms rpc overhead)' %
+                  (len(tetra_centroids),
+                   str(solved),
+                   rpc_duration_secs * 1000,
+                   (rpc_duration_secs - algo_duration_secs) * 1000))

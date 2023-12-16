@@ -80,16 +80,15 @@ impl StarGate for MyStarGate {
         // Sort by brightness estimate, brightest first.
         stars.sort_by(|a, b| b.mean_brightness.partial_cmp(&a.mean_brightness).unwrap());
 
-        let coord_mul = if req.use_binned_for_star_candidates { 2.0 } else { 1.0 };
         let mut candidates = Vec::<star_gate::StarCentroid>::new();
         for star in stars {
             candidates.push(star_gate::StarCentroid{
                 centroid_position: Some(star_gate::ImageCoord{
-                    x: star.centroid_x * coord_mul,
-                    y: star.centroid_y * coord_mul,
+                    x: star.centroid_x,
+                    y: star.centroid_y,
                 }),
-                stddev_x: star.stddev_x * coord_mul,
-                stddev_y: star.stddev_y * coord_mul,
+                stddev_x: star.stddev_x,
+                stddev_y: star.stddev_y,
                 mean_brightness: star.mean_brightness,
                 num_saturated: star.num_saturated as i32,
             });
@@ -99,14 +98,13 @@ impl StarGate for MyStarGate {
             hot_pixel_count: hot_pixel_count as i32,
             star_candidates: candidates,
             binned_image: if binned_image.is_some() {
-                None
-                // let bimg: U16Image = binned_image.unwrap();
-                // Some(star_gate::Image {
-                //     width: bimg.width() as i32,
-                //     height: bimg.height() as i32,
-                //     image_data: bimg.into_raw(),
-                //     shmem_name: None,
-                // })
+                let bimg: GrayImage = binned_image.unwrap();
+                Some(star_gate::Image {
+                    width: bimg.width() as i32,
+                    height: bimg.height() as i32,
+                    image_data: bimg.into_raw(),
+                    shmem_name: None,
+                })
             } else {
                 None
             },
