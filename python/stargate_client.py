@@ -40,7 +40,7 @@ USE_SHMEM = True
 
 # Path where test images are.
 path = Path('../test_data/')
-for impath in list(path.glob('*.jpg')) + list(path.glob('*.bmp')):
+for impath in list(path.glob('*.jpg')) + list(path.glob('*.bmp')) + list(path.glob('*.png')):
     print('Solving for image at: ' + str(impath))
     with Image.open(str(impath)) as img:
         img = img.convert(mode='L')
