@@ -84,9 +84,9 @@ message StarCentroid {
   float stddev_x = 2;
   float stddev_y = 3;
 
-  // Mean of the uint8 pixel values of the star's region (core plus immediate
-  // neighbors). The estimated background is subtracted.
-  float mean_brightness = 4;
+  // Sum of the uint8 pixel values of the star's region. The estimated
+  // background is subtracted.
+  float brightness = 4;
 
   // Count of saturated pixel values.
   int32 num_saturated = 6;

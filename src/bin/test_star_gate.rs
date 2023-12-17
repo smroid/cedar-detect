@@ -88,7 +88,7 @@ fn process_file(file: &str, args: &Args) {
 
     let star_extraction_start = Instant::now();
     let noise_estimate = estimate_noise_from_image(&img_u8);
-    let (mut stars, _, _) = get_stars_from_image(
+    let (stars, _, _) = get_stars_from_image(
         &img_u8, noise_estimate, args.sigma, args.max_size, args.binning,
         /*return_binned_image=*/false);
     let elapsed = star_extraction_start.elapsed();
@@ -96,9 +96,6 @@ fn process_file(file: &str, args: &Args) {
     info!("Star extraction found {} stars in {:?}", stars.len(), elapsed);
     info!("{}ms per megapixel\n",
           elapsed.as_secs_f32() * 1000.0 / ((width * height) as f32 / 1000000.0));
-
-    // Sort by brightness estimate, brightest first.
-    stars.sort_by(|a, b| b.mean_brightness.partial_cmp(&a.mean_brightness).unwrap());
 
     // Scribble marks into the image showing where we found stars.
     let mut img_color = img.into_rgb8();

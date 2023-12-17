@@ -25,8 +25,7 @@ def extract_centroids(stub, image):
         use_binned_for_star_candidates=True)
     return stub.ExtractCentroids(cr)
 
-# Create instance and load default_database (built with max_fov=12 and the rest
-# as default).
+# Create instance and load default_database.
 t3 = Tetra3('default_database')
 
 # Set up to make gRPC calls to StarGate centroid finder (it must be running
@@ -41,7 +40,7 @@ USE_SHMEM = True
 
 # Path where test images are.
 path = Path('../test_data/')
-for impath in path.glob('*.jpg'):
+for impath in list(path.glob('*.jpg')) + list(path.glob('*.bmp')):
     print('Solving for image at: ' + str(impath))
     with Image.open(str(impath)) as img:
         img = img.convert(mode='L')

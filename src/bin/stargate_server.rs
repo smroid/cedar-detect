@@ -66,7 +66,7 @@ impl StarGate for MyStarGate {
         }
 
         let noise_estimate = estimate_noise_from_image(&req_image);
-        let (mut stars, hot_pixel_count, binned_image) = get_stars_from_image(
+        let (stars, hot_pixel_count, binned_image) = get_stars_from_image(
             &req_image, noise_estimate, req.sigma, req.max_size as u32,
             req.use_binned_for_star_candidates, req.return_binned);
 
@@ -77,9 +77,6 @@ impl StarGate for MyStarGate {
             unsafe { close(fd); }
         }
 
-        // Sort by brightness estimate, brightest first.
-        stars.sort_by(|a, b| b.mean_brightness.partial_cmp(&a.mean_brightness).unwrap());
-
         let mut candidates = Vec::<star_gate::StarCentroid>::new();
         for star in stars {
             candidates.push(star_gate::StarCentroid{
@@ -89,7 +86,7 @@ impl StarGate for MyStarGate {
                 }),
                 stddev_x: star.stddev_x,
                 stddev_y: star.stddev_y,
-                mean_brightness: star.mean_brightness,
+                brightness: star.brightness,
                 num_saturated: star.num_saturated as i32,
             });
         }

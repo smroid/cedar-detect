@@ -580,9 +580,9 @@ pub struct StarDescription {
     pub stddev_x: f32,
     pub stddev_y: f32,
 
-    /// Mean of the u8 pixel values of the star's region (core plus immediate
-    /// neighbors). The estimated background is subtracted.
-    pub mean_brightness: f32,
+    /// Sum of the u8 pixel values of the star's region. The estimated
+    /// background is subtracted.
+    pub brightness: f32,
 
     /// Count of saturated pixel values.
     pub num_saturated: u16,
@@ -822,10 +822,18 @@ where i32: From<P>
     // Star passes all of the 2d gates!
 
     if image_width < full_res_image.dimensions().0 {
-        // The `image` is binned.
+        // The `image` is binned. Compute moments using the full-res image.
+        // Translate the margin (in the binned image) to the full-res image.
+        let left: u32 = margin.left() as u32 * 2;
+        let top = margin.top() as u32 * 2;
+        let width = margin.width() * 2;
+        let height = margin.height() * 2;
+        let adj_width = cmp::min(left + width,
+                                 full_res_image.width()) - left;
+        let adj_height = cmp::min(top + height,
+                                  full_res_image.height()) - top;
         let full_res_margin =
-            Rect::at(margin.left() * 2, margin.top() * 2)
-            .of_size(margin.width() * 2, margin.height() * 2);
+            Rect::at(left as i32, top as i32).of_size(adj_width, adj_height);
         Some(compute_moments(full_res_image, &full_res_margin))
     } else {
         Some(compute_moments(full_res_image, &margin))
@@ -836,36 +844,40 @@ where i32: From<P>
 // moment (position spread) of the `image` pixel values in the given
 // `bounding_box`.
 fn compute_moments(image: &GrayImage, bounding_box: &Rect) -> StarDescription {
-    let mut num_saturated = 0;
-    let mut min_value = 255_u8;
+    let mut boundary_sum: i32 = 0;
+    let mut boundary_count: i32 = 0;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
-        &image, &bounding_box, /*include_interior=*/true) {
-        if pixel_value < min_value {
-            min_value = pixel_value;
-        }
-        if pixel_value == 255_u8 {
-            num_saturated += 1;
-        }
+        &image, &bounding_box, /*include_interior=*/false) {
+        boundary_sum += pixel_value as i32;
+        boundary_count += 1;
     }
+    let background_est = boundary_sum as f32 / boundary_count as f32;
 
+    let inset = Rect::at(bounding_box.left() + 1, bounding_box.top() + 1)
+        .of_size(bounding_box.width() - 2, bounding_box.height() - 2);
+
+    let mut num_saturated = 0;
     let mut m0 = 0.0;
     let mut m1x = 0.0;
     let mut m1y = 0.0;
     for (x, y, pixel_value) in EnumeratePixels::new(
-        &image, &bounding_box, /*include_interior=*/true) {
-        let val = pixel_value as f32 - min_value as f32;
+        &image, &inset, /*include_interior=*/true) {
+        if pixel_value == 255_u8 {
+            num_saturated += 1;
+        }
+        let val = pixel_value as f32 - background_est;
         m0 += val;
         m1x += x as f32 * val;
         m1y += y as f32 * val;
     }
     // Very unlikely, but return something sensible.
-    if m0 == 0.0 {
+    if m0 <= 0.0 {
         return StarDescription{
-            centroid_x: bounding_box.left() as f32 + bounding_box.width() as f32 / 2.0,
-            centroid_y: bounding_box.top() as f32 + bounding_box.height() as f32 / 2.0,
-            stddev_x: bounding_box.width() as f32,
-            stddev_y: bounding_box.height() as f32,
-            mean_brightness: 0.0,
+            centroid_x: inset.left() as f32 + inset.width() as f32 / 2.0,
+            centroid_y: inset.top() as f32 + inset.height() as f32 / 2.0,
+            stddev_x: inset.width() as f32,
+            stddev_y: inset.height() as f32,
+            brightness: 0.0,
             num_saturated};
     }
 
@@ -876,8 +888,8 @@ fn compute_moments(image: &GrayImage, bounding_box: &Rect) -> StarDescription {
     let mut m2x_c = 0.0;
     let mut m2y_c = 0.0;
     for (x, y, pixel_value) in EnumeratePixels::new(
-        &image, &bounding_box, /*include_interior=*/true) {
-        let val = pixel_value as f32 - min_value as f32;
+        &image, &inset, /*include_interior=*/true) {
+        let val = pixel_value as f32 - background_est;
         m2x_c += (x as f32 - centroid_x) * (x as f32 - centroid_x) * val;
         m2y_c += (y as f32 - centroid_y) * (y as f32 - centroid_y) * val;
     }
@@ -888,7 +900,7 @@ fn compute_moments(image: &GrayImage, bounding_box: &Rect) -> StarDescription {
         centroid_y: (centroid_y + 0.5) as f32,
         stddev_x: variance_x.sqrt() as f32,
         stddev_y: variance_y.sqrt() as f32,
-        mean_brightness: m0 / (bounding_box.width() * bounding_box.height()) as f32,
+        brightness: m0,
         num_saturated}
 }
 
@@ -1040,7 +1052,7 @@ fn stats_for_histogram(histogram: &[u32; 1024])
 ///   that hot pixels are replaced during the binning process.
 ///
 /// # Returns
-/// Vec<[StarDescription]>, in unspecified order.
+/// Vec<[StarDescription]>, in order of descending brightness.
 ///
 /// i32: The number of hot pixels seen. See implementation for more information
 /// about hot pixels.
@@ -1108,6 +1120,9 @@ pub fn get_stars_from_image(
             }
         }
     }
+
+    // Sort by brightness estimate, brightest first.
+    stars.sort_by(|a, b| b.brightness.partial_cmp(&a.brightness).unwrap());
 
     (stars, hot_pixel_count, binned_image8)
 }
@@ -1460,7 +1475,7 @@ mod tests {
         assert_eq!(value, 11);
         assert_eq!(result_type, ResultType::HotPixel);
 
-        // Neighbors have enough brighness, so bright center is deemed a
+        // Neighbors have enough brightness, so bright center is deemed a
         // star candidate.
         gate = [10, 10, 12, 15, 12, 10, 10];
         (value, result_type) =
@@ -1478,7 +1493,7 @@ mod tests {
         assert_eq!(value, 15);  // Hot pixel not substituted.
         assert_eq!(result_type, ResultType::Candidate);
 
-        // Neighbors have enough brighness, so bright center is deemed a
+        // Neighbors have enough brightness, so bright center is deemed a
         // star candidate.
         gate = [10, 10, 12, 15, 12, 10, 10];
         (value, result_type) =
@@ -1914,18 +1929,18 @@ mod tests {
         9, 10, 12,  14, 30, 10,  9;
         9, 10, 10,  10, 10, 10,  9;
         9,  9,  9,   9,  9,  9,  9);
-        let neighbors = Rect::at(2, 2).of_size(3, 3);
+        let neighbors = Rect::at(1, 1).of_size(5, 5);
         let star_description = compute_moments(&image_7x7, &neighbors);
         assert_abs_diff_eq!(star_description.centroid_x,
                             3.53, epsilon = 0.01);
         assert_abs_diff_eq!(star_description.centroid_y,
-                            3.06, epsilon = 0.01);
+                            3.07, epsilon = 0.01);
         assert_abs_diff_eq!(star_description.stddev_x,
-                            0.20, epsilon = 0.01);
+                            0.25, epsilon = 0.01);
         assert_abs_diff_eq!(star_description.stddev_y,
-                            0.57, epsilon = 0.01);
-        assert_abs_diff_eq!(star_description.mean_brightness,
-                            56.6, epsilon = 0.1);
+                            0.58, epsilon = 0.01);
+        assert_abs_diff_eq!(star_description.brightness,
+                            528.0, epsilon = 0.1);
         assert_eq!(star_description.num_saturated, 2);
     }
 
@@ -1990,9 +2005,9 @@ mod tests {
         assert_eq!(roi_summary.histogram[32], 1);
         // The hot pixel is not the peak.
         assert_abs_diff_eq!(roi_summary.peak_x,
-                            5.43, epsilon = 0.01);
+                            5.23, epsilon = 0.01);
         assert_abs_diff_eq!(roi_summary.peak_y,
-                            4.52, epsilon = 0.01);
+                            4.58, epsilon = 0.01);
     }
 
 }  // mod tests.
