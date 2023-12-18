@@ -94,6 +94,6 @@ for impath in list(path.glob('*.jpg')) + list(path.glob('*.bmp')) + list(path.gl
                                   centroids_result.algorithm_time.nanos / 1e9)
             print('Centroids: %s. Solution: %s. %.2fms in centroiding (%.2fms rpc overhead)' %
                   (len(tetra_centroids),
-                   str(solved),
+                   solved,
                    rpc_duration_secs * 1000,
                    (rpc_duration_secs - algo_duration_secs) * 1000))

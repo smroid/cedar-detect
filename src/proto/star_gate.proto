@@ -49,7 +49,7 @@ message CentroidsResult {
   int32 hot_pixel_count = 2;
 
   // The star candidates detected by StarGate; ordered by highest
-  // mean_brightness first.
+  // brightness first.
   repeated StarCentroid star_candidates = 3;
 
   // If `return_binned` is present the request, this is the result.

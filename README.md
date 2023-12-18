@@ -21,7 +21,7 @@ Features:
   usually less than 10ms, even when several dozen stars are present in the
   image.
 
-For more information, see the crate documentation in src/lib.rs.
+For more information, see the crate documentation in src/algorithm.rs.
 
 # Usage
 

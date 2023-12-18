@@ -120,6 +120,11 @@ use image::{GrayImage, ImageBuffer, Luma, Primitive};
 use imageproc::rect::Rect;
 use log::{debug};
 
+// When get_stars_from_image() is called with the 'use_binned_image' option,
+// an intermediate 2x2 binned image is formed by summing pixel values. This
+// results in up to 10 bit pixel values, so we use a u16 ImageBuffer when
+// processing the 2x2 binned image (rather than discarding information by
+// scaling back down to 8 bit pixel values).
 type Gray16Image = ImageBuffer<Luma<u16>, Vec<u16>>;
 
 // An iterator over the pixels of a region of interest. Yields pixels in raster
