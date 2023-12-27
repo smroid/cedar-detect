@@ -887,8 +887,24 @@ fn compute_moments(image: &GrayImage, bounding_box: &Rect) -> StarDescription {
     }
 
     // We use simple center-of-mass as the centroid.
-    let centroid_x = m1x / m0;
-    let centroid_y = m1y / m0;
+    let mut centroid_x = m1x / m0;
+    let mut centroid_y = m1y / m0;
+
+    // Clamp the centroid to the bounding_box. When the box contents are
+    // ~flat the computed centroid can dance beyond the boundary.
+    if centroid_x < bounding_box.left() as f32 {
+        centroid_x = bounding_box.left() as f32 ;
+    }
+    if centroid_x > bounding_box.right()  as f32 {
+        centroid_x = bounding_box.right() as f32 ;
+    }
+    if centroid_y < bounding_box.top()  as f32 {
+        centroid_y = bounding_box.top() as f32 ;
+    }
+    if centroid_y > bounding_box.bottom()  as f32 {
+        centroid_y = bounding_box.bottom() as f32 ;
+    }
+
     // Compute second moment about the centroid.
     let mut m2x_c = 0.0;
     let mut m2y_c = 0.0;
@@ -898,13 +914,20 @@ fn compute_moments(image: &GrayImage, bounding_box: &Rect) -> StarDescription {
         m2x_c += (x as f32 - centroid_x) * (x as f32 - centroid_x) * val;
         m2y_c += (y as f32 - centroid_y) * (y as f32 - centroid_y) * val;
     }
-    let variance_x = m2x_c / m0;
-    let variance_y = m2y_c / m0;
+    let mut stddev_x = (m2x_c / m0).sqrt();
+    let mut stddev_y = (m2y_c / m0).sqrt();
+    if stddev_x > bounding_box.width() as f32 {
+        stddev_x = bounding_box.width() as f32;
+    }
+    if stddev_y > bounding_box.height() as f32 {
+        stddev_y = bounding_box.height() as f32;
+    }
+
     StarDescription{
         centroid_x: (centroid_x + 0.5) as f32,
         centroid_y: (centroid_y + 0.5) as f32,
-        stddev_x: variance_x.sqrt() as f32,
-        stddev_y: variance_y.sqrt() as f32,
+        stddev_x,
+        stddev_y,
         brightness: m0,
         num_saturated}
 }
@@ -1182,7 +1205,6 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
     let mut peak_y = 0;
     let mut peak_val = 0_u8;
     let (width, height) = image.dimensions();
-    assert!(roi.bottom() < height as i32);
     // Sliding gate needs to extend past left and right edges of ROI. Make sure
     // there's enough image.
     let gate_leftmost: i32 = roi.left() as i32 - 3;
@@ -1219,7 +1241,7 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
             cleaned_image.put_pixel(center_x as u32, rownum as u32,
                                     Luma::<u8>([pixel_value]));
             histogram[pixel_value as usize] += 1;
-            if pixel_value > peak_val {
+            if pixel_value >= peak_val {
                 peak_x = center_x;
                 peak_y = rownum;
                 peak_val = pixel_value;
@@ -1231,7 +1253,6 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
     // Apply centroiding to get sub-pixel resolution for peak_x/y.
     let bounding_box = Rect::at(peak_x - 3, peak_y - 3).of_size(7, 7);
     let moments = compute_moments(&cleaned_image, &bounding_box);
-
     debug!("ROI processing completed in {:?}", process_roi_start.elapsed());
     RegionOfInterestSummary{histogram,
                             peak_x: moments.centroid_x,
