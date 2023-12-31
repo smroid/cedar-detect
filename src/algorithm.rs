@@ -580,11 +580,6 @@ pub struct StarDescription {
     pub centroid_x: f32,
     pub centroid_y: f32,
 
-    /// Characterizes the extent or spread of the star in each direction, in
-    /// pixel size units.
-    pub stddev_x: f32,
-    pub stddev_y: f32,
-
     /// Sum of the u8 pixel values of the star's region. The estimated
     /// background is subtracted.
     pub brightness: f32,
@@ -845,9 +840,8 @@ where i32: From<P>
     }
 }
 
-// Computes zeroeth moment (brightness), first moment (position) and second
-// moment (position spread) of the `image` pixel values in the given
-// `bounding_box`.
+// Computes zeroeth moment (brightness) and first moment (position) of the
+// `image` pixel values in the given `bounding_box`.
 fn compute_moments(image: &GrayImage, bounding_box: &Rect) -> StarDescription {
     let mut boundary_sum: i32 = 0;
     let mut boundary_count: i32 = 0;
@@ -880,8 +874,6 @@ fn compute_moments(image: &GrayImage, bounding_box: &Rect) -> StarDescription {
         return StarDescription{
             centroid_x: inset.left() as f32 + inset.width() as f32 / 2.0,
             centroid_y: inset.top() as f32 + inset.height() as f32 / 2.0,
-            stddev_x: inset.width() as f32,
-            stddev_y: inset.height() as f32,
             brightness: 0.0,
             num_saturated};
     }
@@ -890,44 +882,24 @@ fn compute_moments(image: &GrayImage, bounding_box: &Rect) -> StarDescription {
     let mut centroid_x = m1x / m0;
     let mut centroid_y = m1y / m0;
 
-    // Clamp the centroid to the bounding_box. When the box contents are
+    // Clamp the centroid to the inset. When the box contents are
     // ~flat the computed centroid can dance beyond the boundary.
-    if centroid_x < bounding_box.left() as f32 {
-        centroid_x = bounding_box.left() as f32 ;
+    if centroid_x < inset.left() as f32 {
+        centroid_x = inset.left() as f32 ;
     }
-    if centroid_x > bounding_box.right()  as f32 {
-        centroid_x = bounding_box.right() as f32 ;
+    if centroid_x > inset.right()  as f32 {
+        centroid_x = inset.right() as f32 ;
     }
-    if centroid_y < bounding_box.top()  as f32 {
-        centroid_y = bounding_box.top() as f32 ;
+    if centroid_y < inset.top()  as f32 {
+        centroid_y = inset.top() as f32 ;
     }
-    if centroid_y > bounding_box.bottom()  as f32 {
-        centroid_y = bounding_box.bottom() as f32 ;
-    }
-
-    // Compute second moment about the centroid.
-    let mut m2x_c = 0.0;
-    let mut m2y_c = 0.0;
-    for (x, y, pixel_value) in EnumeratePixels::new(
-        &image, &inset, /*include_interior=*/true) {
-        let val = pixel_value as f32 - background_est;
-        m2x_c += (x as f32 - centroid_x) * (x as f32 - centroid_x) * val;
-        m2y_c += (y as f32 - centroid_y) * (y as f32 - centroid_y) * val;
-    }
-    let mut stddev_x = (m2x_c / m0).sqrt();
-    let mut stddev_y = (m2y_c / m0).sqrt();
-    if stddev_x > bounding_box.width() as f32 {
-        stddev_x = bounding_box.width() as f32;
-    }
-    if stddev_y > bounding_box.height() as f32 {
-        stddev_y = bounding_box.height() as f32;
+    if centroid_y > inset.bottom()  as f32 {
+        centroid_y = inset.bottom() as f32 ;
     }
 
     StarDescription{
         centroid_x: (centroid_x + 0.5) as f32,
         centroid_y: (centroid_y + 0.5) as f32,
-        stddev_x,
-        stddev_y,
         brightness: m0,
         num_saturated}
 }
@@ -1961,10 +1933,6 @@ mod tests {
                             3.53, epsilon = 0.01);
         assert_abs_diff_eq!(star_description.centroid_y,
                             3.07, epsilon = 0.01);
-        assert_abs_diff_eq!(star_description.stddev_x,
-                            0.25, epsilon = 0.01);
-        assert_abs_diff_eq!(star_description.stddev_y,
-                            0.58, epsilon = 0.01);
         assert_abs_diff_eq!(star_description.brightness,
                             528.0, epsilon = 0.1);
         assert_eq!(star_description.num_saturated, 2);

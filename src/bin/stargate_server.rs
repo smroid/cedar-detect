@@ -84,8 +84,6 @@ impl StarGate for MyStarGate {
                     x: star.centroid_x,
                     y: star.centroid_y,
                 }),
-                stddev_x: star.stddev_x,
-                stddev_y: star.stddev_y,
                 brightness: star.brightness,
                 num_saturated: star.num_saturated as i32,
             });

@@ -79,11 +79,6 @@ message StarCentroid {
   // Location of star centroid in full resolution image coordinates.
   ImageCoord centroid_position = 1;
 
-  // Characterizes the extent or spread of the star in each direction, in pixel
-  // size units.
-  float stddev_x = 2;
-  float stddev_y = 3;
-
   // Sum of the uint8 pixel values of the star's region. The estimated
   // background is subtracted.
   float brightness = 4;

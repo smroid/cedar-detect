@@ -6,3 +6,7 @@ Map hot pixels with a dark exposure.
   Drawback: Adds a workflow complication, need the user's involvement in
     capturing the dark frame.
 
+
+When calling compute_moments() on full res image when binning was used for star
+detection, pass in a map of hot pixels detected during the binning. This will
+allow compute_moments() to replace hot pixels during the moment calculations.
