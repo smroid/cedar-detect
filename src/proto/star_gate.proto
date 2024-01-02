@@ -2,6 +2,9 @@ syntax = "proto3";
 
 import "google/protobuf/duration.proto";
 
+// In 'python' dir:
+// python -m grpc_tools.protoc -I=../src/proto --python_out=. --pyi_out=. --grpc_python_out=. ../src/proto/star_gate.proto
+
 package star_gate;
 
 message CentroidsRequest {

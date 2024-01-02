@@ -89,7 +89,9 @@ for impath in list(path.glob('*.jpg')) + list(path.glob('*.bmp')) + list(path.gl
                 tetra_centroids.append((sc.centroid_position.y,
                                         sc.centroid_position.x))
             solved = t3.solve_from_centroids(tetra_centroids, (height, width),
-                                             fov_estimate=11, match_max_error=0.005)
+                                             distortion=0, match_radius=0.01,
+                                             fov_estimate=11, match_max_error=0.002,
+                                             pattern_checking_stars=12)
             algo_duration_secs = (centroids_result.algorithm_time.seconds +
                                   centroids_result.algorithm_time.nanos / 1e9)
             print('Centroids: %s. Solution: %s. %.2fms in centroiding (%.2fms rpc overhead)' %
