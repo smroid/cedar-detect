@@ -1,5 +1,5 @@
 """
-This example loads the tetra3 default database and solves an image using StarGate's
+This example loads the tetra3 default database and solves an image using CedarDetect's
 centroid finding and Tetra3's solve_from_centroids().
 
 Note: Requires PIL (pip install Pillow)
@@ -16,11 +16,11 @@ from time import perf_counter as precision_timestamp
 
 import grpc
 from multiprocessing import shared_memory
-import star_gate_pb2
-import star_gate_pb2_grpc
+import cedar_detect_pb2
+import cedar_detect_pb2_grpc
 
 def extract_centroids(stub, image):
-    cr = star_gate_pb2.CentroidsRequest(
+    cr = cedar_detect_pb2.CentroidsRequest(
         input_image=image, sigma=8.0, max_size=5, return_binned=False,
         use_binned_for_star_candidates=True)
     return stub.ExtractCentroids(cr)
@@ -28,13 +28,13 @@ def extract_centroids(stub, image):
 # Create instance and load default_database.
 t3 = Tetra3('default_database')
 
-# Set up to make gRPC calls to StarGate centroid finder (it must be running
+# Set up to make gRPC calls to CedarDetect centroid finder (it must be running
 # already).
 channel = grpc.insecure_channel('localhost:50051')
-stub = star_gate_pb2_grpc.StarGateStub(channel)
+stub = cedar_detect_pb2_grpc.CedarDetectStub(channel)
 
 # Use shared memory to make the gRPC calls faster. This works only when the
-# client (this program) and the StarGate gRPC server are running on the same
+# client (this program) and the CedarDetect gRPC server are running on the same
 # machine.
 USE_SHMEM = True
 
@@ -54,9 +54,9 @@ for impath in list(path.glob('*.jpg')) + list(path.glob('*.bmp')) + list(path.gl
             # object, with the gRPC request giving the name of the shared memory
             # object.
 
-            # Set up shared memory object for passing input image to StarGate.
+            # Set up shared memory object for passing input image to CedarDetect.
             shmem = shared_memory.SharedMemory(
-                "/stargate_image", create=True, size=height*width)
+                "/cedar_detect_image", create=True, size=height*width)
             try:
                 # Create numpy array backed by shmem.
                 shimg = np.ndarray(image.shape, dtype=image.dtype, buffer=shmem.buf)
@@ -64,8 +64,8 @@ for impath in list(path.glob('*.jpg')) + list(path.glob('*.bmp')) + list(path.gl
                 # over the gRPC call.
                 shimg[:] = image[:]
 
-                im = star_gate_pb2.Image(width=width, height=height,
-                                         shmem_name=shmem.name)
+                im = cedar_detect_pb2.Image(width=width, height=height,
+                                            shmem_name=shmem.name)
                 rpc_start = precision_timestamp()
                 centroids_result = extract_centroids(stub, im)
                 rpc_duration_secs = precision_timestamp() - rpc_start
@@ -75,8 +75,8 @@ for impath in list(path.glob('*.jpg')) + list(path.glob('*.bmp')) + list(path.gl
         else:
             # Not using shared memory. The image data is passed as part of the
             # gRPC request.
-            im = star_gate_pb2.Image(width=width, height=height,
-                                     image_data=image.tobytes())
+            im = cedar_detect_pb2.Image(width=width, height=height,
+                                        image_data=image.tobytes())
             rpc_start = precision_timestamp()
             centroids_result = extract_centroids(stub, im)
             rpc_duration_secs = precision_timestamp() - rpc_start
@@ -89,9 +89,7 @@ for impath in list(path.glob('*.jpg')) + list(path.glob('*.bmp')) + list(path.gl
                 tetra_centroids.append((sc.centroid_position.y,
                                         sc.centroid_position.x))
             solved = t3.solve_from_centroids(tetra_centroids, (height, width),
-                                             distortion=0, match_radius=0.01,
-                                             fov_estimate=11, match_max_error=0.002,
-                                             pattern_checking_stars=12)
+                                             fov_estimate=11)
             algo_duration_secs = (centroids_result.algorithm_time.seconds +
                                   centroids_result.algorithm_time.nanos / 1e9)
             print('Centroids: %s. Solution: %s. %.2fms in centroiding (%.2fms rpc overhead)' %

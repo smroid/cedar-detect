@@ -8,28 +8,28 @@ use image::{GrayImage};
 use libc::{close, mmap, shm_open, c_char, O_RDONLY, PROT_READ, MAP_SHARED};
 use log::{info};
 
-use ::star_gate::algorithm::{estimate_noise_from_image, get_stars_from_image};
-use crate::star_gate::star_gate_server::{StarGate, StarGateServer};
+use ::cedar_detect::algorithm::{estimate_noise_from_image, get_stars_from_image};
+use crate::cedar_detect::cedar_detect_server::{CedarDetect, CedarDetectServer};
 
 use tonic_web::GrpcWebLayer;
 
-pub mod star_gate {
+pub mod cedar_detect {
     // The string specified here must match the proto package name.
-    tonic::include_proto!("star_gate");
+    tonic::include_proto!("cedar_detect");
 }
 
-struct MyStarGate {
+struct MyCedarDetect {
     // No server state; pure function calls.
 }
 
 #[tonic::async_trait]
-impl StarGate for MyStarGate {
+impl CedarDetect for MyCedarDetect {
     async fn extract_centroids(
-        &self, request: tonic::Request<star_gate::CentroidsRequest>)
-        -> Result<tonic::Response<star_gate::CentroidsResult>, tonic::Status>
+        &self, request: tonic::Request<cedar_detect::CentroidsRequest>)
+        -> Result<tonic::Response<cedar_detect::CentroidsResult>, tonic::Status>
     {
         let rpc_start = Instant::now();
-        let req: star_gate::CentroidsRequest = request.into_inner();
+        let req: cedar_detect::CentroidsRequest = request.into_inner();
 
         if req.input_image.is_none() {
             return Err(tonic::Status::invalid_argument(
@@ -77,10 +77,10 @@ impl StarGate for MyStarGate {
             unsafe { close(fd); }
         }
 
-        let mut candidates = Vec::<star_gate::StarCentroid>::new();
+        let mut candidates = Vec::<cedar_detect::StarCentroid>::new();
         for star in stars {
-            candidates.push(star_gate::StarCentroid{
-                centroid_position: Some(star_gate::ImageCoord{
+            candidates.push(cedar_detect::StarCentroid{
+                centroid_position: Some(cedar_detect::ImageCoord{
                     x: star.centroid_x,
                     y: star.centroid_y,
                 }),
@@ -88,13 +88,13 @@ impl StarGate for MyStarGate {
                 num_saturated: star.num_saturated as i32,
             });
         }
-        let response = star_gate::CentroidsResult{
+        let response = cedar_detect::CentroidsResult{
             noise_estimate,
             hot_pixel_count: hot_pixel_count as i32,
             star_candidates: candidates,
             binned_image: if binned_image.is_some() {
                 let bimg: GrayImage = binned_image.unwrap();
-                Some(star_gate::Image {
+                Some(cedar_detect::Image {
                     width: bimg.width() as i32,
                     height: bimg.height() as i32,
                     image_data: bimg.into_raw(),
@@ -126,12 +126,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Listen on any address for the given port.
     let addr = SocketAddr::from(([0, 0, 0, 0], args.port));
-    info!("StarGateServer listening on {}", addr);
+    info!("CedarDetectServer listening on {}", addr);
 
     tonic::transport::Server::builder()
         .accept_http1(true)
         .layer(GrpcWebLayer::new())
-        .add_service(StarGateServer::new(MyStarGate{}))
+        .add_service(CedarDetectServer::new(MyCedarDetect{}))
         .serve(addr)
         .await?;
     Ok(())

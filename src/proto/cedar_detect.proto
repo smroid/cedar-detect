@@ -3,9 +3,9 @@ syntax = "proto3";
 import "google/protobuf/duration.proto";
 
 // In 'python' dir:
-// python -m grpc_tools.protoc -I=../src/proto --python_out=. --pyi_out=. --grpc_python_out=. ../src/proto/star_gate.proto
+// python -m grpc_tools.protoc -I=../src/proto --python_out=. --pyi_out=. --grpc_python_out=. ../src/proto/cedar_detect.proto
 
-package star_gate;
+package cedar_detect;
 
 message CentroidsRequest {
   // The image to analyze. The entire image is scanned for stars, excluding the
@@ -21,14 +21,14 @@ message CentroidsRequest {
   // Typical `sigma` values: 5-10.
   float sigma = 2;
 
-  // StarGate clumps adjacent bright pixels to form a single star candidate. The
+  // CedarDetect clumps adjacent bright pixels to form a single star candidate. The
   // `max_size` argument governs how large a clump can be before it is rejected.
   // Note that making `max_size` small can eliminate very bright stars that
   // "bleed" to many surrounding pixels.
   // Typical `max_size` values: 3-5.
   int32 max_size = 3;
 
-  // If true, in addition to identifying star candidates, the StarGate algorithm
+  // If true, in addition to identifying star candidates, the CedarDetect algorithm
   // should also return a 2x2 binning of `input_image`, with hot pixels
   // eliminated.
   bool return_binned = 4;
@@ -51,14 +51,14 @@ message CentroidsResult {
   // information about hot pixels.
   int32 hot_pixel_count = 2;
 
-  // The star candidates detected by StarGate; ordered by highest
+  // The star candidates detected by CedarDetect; ordered by highest
   // brightness first.
   repeated StarCentroid star_candidates = 3;
 
   // If `return_binned` is present the request, this is the result.
   optional Image binned_image = 4;
 
-  // The time spent in the StarGate algorithm. The client can subtract this from
+  // The time spent in the CedarDetect algorithm. The client can subtract this from
   // the overall RPC time to glean the RPC overhead, which is likely dominated
   // by the time needed to transfer `input_image` in the request.
   google.protobuf.Duration algorithm_time = 5;
@@ -77,7 +77,7 @@ message Image {
   optional string shmem_name = 4;
 }
 
-// Summarizes a star-like spot found by the StarGate algorithm.
+// Summarizes a star-like spot found by the CedarDetect algorithm.
 message StarCentroid {
   // Location of star centroid in full resolution image coordinates.
   ImageCoord centroid_position = 1;
@@ -97,6 +97,6 @@ message ImageCoord {
   float y = 2;
 }
 
-service StarGate {
+service CedarDetect {
   rpc ExtractCentroids(CentroidsRequest) returns (CentroidsResult);
 }

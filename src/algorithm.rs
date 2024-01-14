@@ -1,5 +1,5 @@
-//! StarGate provides efficient and accurate detection of stars in sky images.
-//! Given an image, StarGate returns a list of detected star centroids expressed
+//! CedarDetect provides efficient and accurate detection of stars in sky images.
+//! Given an image, CedarDetect returns a list of detected star centroids expressed
 //! in image pixel coordinates.
 //!
 //! Features:
@@ -21,29 +21,29 @@
 //!
 //! # Intended applications
 //!
-//! StarGate is designed to be used with astrometry and plate solving systems
+//! CedarDetect is designed to be used with astrometry and plate solving systems
 //! such as [Tetra3](https://github.com/esa/tetra3). It can also be incorporated
 //! into satellite star trackers.
 //!
-//! A goal of StarGate is to allow such applications to achieve fast response
-//! times. StarGate contributes to this by running quickly and by tolerating a
+//! A goal of CedarDetect is to allow such applications to achieve fast response
+//! times. CedarDetect contributes to this by running quickly and by tolerating a
 //! degree of image noise allowing for shorter imaging integration times.
 //!
 //! # Star detection fidelity
 //!
-//! Like any detection algorithm, StarGate produces both false negatives (failures
+//! Like any detection algorithm, CedarDetect produces both false negatives (failures
 //! to detect actual stars) and false positives (spurious star detections). The
 //! Caveats section below mentions some causes of false negatives.
 //!
 //! False positives can occur as you reduce the `sigma` parameter when calling
 //! [get_stars_from_image()] in an attempt to increase the number of detected
-//! stars. Although StarGate requires evidence from multiple pixels to qualify
+//! stars. Although CedarDetect requires evidence from multiple pixels to qualify
 //! each star detection (reducing the occurrence of false positives), noise
 //! inevitably wins if you push `sigma` too low.
 //!
 //! # Algorithm
 //!
-//! StarGate spends most of its time on a single efficient pass over the input
+//! CedarDetect spends most of its time on a single efficient pass over the input
 //! image. This generates a set of star candidates that are subjected to further
 //! scrutiny. The candidates number in the hundreds or perhaps thousands (thus
 //! much less than the number of image pixels), so the candidate evaluation
@@ -55,40 +55,40 @@
 //!
 //! ## Star extraction only
 //!
-//! StarGate is designed to identify only star-like spots. It is not a
+//! CedarDetect is designed to identify only star-like spots. It is not a
 //! generalized astronomical source extraction system.
 //!
 //! ## Crowding
 //!
-//! The criteria used by StarGate to efficiently detect stars are designed
+//! The criteria used by CedarDetect to efficiently detect stars are designed
 //! around the characteristics of a star image's pixels compared to surrounding
-//! pixels. StarGate can thus be confused when stars are too closely spaced, or
+//! pixels. CedarDetect can thus be confused when stars are too closely spaced, or
 //! a star is close to a hot pixel. Such situations will usually cause closely
 //! spaced stars to fail to be detected. Note that for applications such as
 //! plate solving, this is probably for the better.
 //!
 //! ## Imaging requirements
 //!
-//! * StarGate supports only 8-bit grayscale images; color images or images with
+//! * CedarDetect supports only 8-bit grayscale images; color images or images with
 //!   greater bit depth must be converted before calling
 //!   [get_stars_from_image()].
 //! * The imaging exposure time and sensor gain are usually chosen by the caller
 //!   to yield a desired number of faint star detections. In so doing, if a
 //!   bright star is overexposed to a degree that it bleeds into too many
-//!   adjacent pixels, StarGate will reject the bright star.
+//!   adjacent pixels, CedarDetect will reject the bright star.
 //! * Pixel scale and focusing are crucial:
-//!   * If star images are too extended w.r.t. the pixel grid, StarGate might not
+//!   * If star images are too extended w.r.t. the pixel grid, CedarDetect might not
 //!     detect the stars. You'll either need to tighten the focus or use the pixel
 //!     binning option when calling [get_stars_from_image()].
-//!   * If stars are too small w.r.t. the pixel grid, StarGate might
+//!   * If stars are too small w.r.t. the pixel grid, CedarDetect might
 //!     mis-classify stars as hot pixels. A simple remedy is to slightly defocus
 //!     causing stars to occupy a central peak pixel with a bit of spread into
 //!     immediately adjacent pixels.
-//! * StarGate does not tolerate more than maybe a single pixel of motion blur.
+//! * CedarDetect does not tolerate more than maybe a single pixel of motion blur.
 //!
 //! ## Centroid estimation
 //!
-//! StarGate's computes a sub-pixel centroid position for each detected star
+//! CedarDetect's computes a sub-pixel centroid position for each detected star
 //! using the first moment of pixel intensity (center of gravity) calculated
 //! over a bounding box around the star. This suffices for many purposes, but a
 //! more exacting application might want to do its own centroiding:
@@ -101,14 +101,14 @@
 //!
 //! ## Lens distortions
 //!
-//! Optical imaging systems can produce distortions that affect StarGate in two
+//! Optical imaging systems can produce distortions that affect CedarDetect in two
 //! ways:
 //!
 //! * Optical aberrations can cause star images to deviate from ideal small
-//!   condensed spots. StarGate will fail to detect stars that are too distorted,
+//!   condensed spots. CedarDetect will fail to detect stars that are too distorted,
 //!   such as near the corners of a wide field image.
 //! * Lens pincushion and/or barrel distortions can cause reported star positions
-//!   to deviate from their true positions. StarGate reports star centroids in
+//!   to deviate from their true positions. CedarDetect reports star centroids in
 //!   the image's x/y coordinates; it is up to the application to apply any needed
 //!   lens distortion corrections when doing astrometry (e.g. plate solving).
 
@@ -1021,7 +1021,7 @@ fn stats_for_histogram(histogram: &[u32; 1024])
     (mean, stddev, median)
 }
 
-/// This function runs the StarGate algorithm on the supplied `image`, returning
+/// This function runs the CedarDetect algorithm on the supplied `image`, returning
 /// a [StarDescription] for each detected star.
 ///
 /// # Arguments
@@ -1038,7 +1038,7 @@ fn stats_for_histogram(histogram: &[u32; 1024])
 ///   stars; lower `sigma` values yield more stars but increase the likelihood
 ///   of noise-induced false positives. Typical `sigma` values: 5-10.
 ///
-///   `max_size` - StarGate clumps adjacent bright pixels to form a single star
+///   `max_size` - CedarDetect clumps adjacent bright pixels to form a single star
 ///   candidate. The `max_size` argument governs how large a clump can be before
 ///   it is rejected. Note that making `max_size` small can eliminate very
 ///   bright stars that "bleed" to many surrounding pixels. Typical `max_size`

@@ -1,11 +1,11 @@
 [package]
-name = "star_gate"
-version = "0.3.0"
+name = "cedar_detect"
+version = "0.4.0"
 edition = "2021"
 
 [[bin]]
-name = "stargate-server"
-path = "src/bin/stargate_server.rs"
+name = "cedar-detect-server"
+path = "src/bin/cedar_detect_server.rs"
 
 [dependencies]
 approx = "0.5.1"

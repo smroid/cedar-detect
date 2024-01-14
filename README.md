@@ -1,7 +1,7 @@
 # Overview
 
-StarGate provides efficient and accurate detection of stars in sky images.
-Given an image, StarGate returns a list of detected star centroids expressed
+CedarDetect provides efficient and accurate detection of stars in sky images.
+Given an image, CedarDetect returns a list of detected star centroids expressed
 in image pixel coordinates.
 
 Features:
@@ -27,21 +27,21 @@ For more information, see the crate documentation in src/algorithm.rs.
 
 ## Rust
 
-See the sample program at src/bin/test_star_gate.rs for example usages of
-StarGate called directly from Rust program logic.
+See the sample program at src/bin/test_cedar_detect.rs for example usages of
+CedarDetect called directly from Rust program logic.
 
 ## Python
 
-There is (currently) no option to link StarGate with Python. Instead, a
+There is (currently) no option to link CedarDetect with Python. Instead, a
 microservice invocation API is provided using gRPC.
 
-The src/bin/stargate_server.rs binary runs as a gRPC service, providing a simple
-image &rarr; centroids RPC interface. See src/proto/star_gate.proto for the gRPC
+The src/bin/cedar_detect_server.rs binary runs as a gRPC service, providing a simple
+image &rarr; centroids RPC interface. See src/proto/cedar_detect.proto for the gRPC
 service definition.
 
-In python/stargate_client.py, a simple Python script demonstrates how to invoke
-StarGate using its gRPC server. This program reads some test images, uses
-StarGate to find centroids, and then plate-solves these centroids using Tetra3.
+In python/cedar_detect_client.py, a simple Python script demonstrates how to invoke
+CedarDetect using its gRPC server. This program reads some test images, uses
+CedarDetect to find centroids, and then plate-solves these centroids using Tetra3.
 
 To try it out:
 
@@ -49,13 +49,13 @@ To try it out:
 1. Install Tetra3.
 2. With python/ as your current directory, execute:
 
-        python -m grpc_tools.protoc -I../src/proto --python_out=. --pyi_out=. --grpc_python_out=. ../src/proto/star_gate.proto
-3. Run the stargate gRPC server in background:
+        python -m grpc_tools.protoc -I../src/proto --python_out=. --pyi_out=. --grpc_python_out=. ../src/proto/cedar_detect.proto
+3. Run the CedarDetect gRPC server in background:
 
-        cargo run --release --bin stargate-server &
+        cargo run --release --bin cedar-detect-server &
 4. Run the python program:
 
-        python stargate_client.py
+        python cedar_detect_client.py
 ## Other languages
 
-Any language that can be a gRPC client should be able to invoke StarGate.
+Any language that can be a gRPC client should be able to invoke CedarDetect.

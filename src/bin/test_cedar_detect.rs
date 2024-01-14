@@ -9,9 +9,9 @@ use image::Rgb;
 use imageproc::drawing;
 use log::{info, warn};
 
-use star_gate::algorithm::{estimate_noise_from_image, get_stars_from_image};
+use cedar_detect::algorithm::{estimate_noise_from_image, get_stars_from_image};
 
-/// Example program for running the StarGate star finding algorithm
+/// Example program for running the CedarDetect star finding algorithm
 /// on test image(s).
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about=None)]
@@ -33,7 +33,7 @@ struct Args {
     max_size: u32,
 
     /// Whether image should be 2x2 binned prior to star detection.
-    #[arg(short, long, default_value_t = false)]
+    #[arg(short, long, default_value_t = true)]
     binning: bool,
 
     /// Output list of star centroids.

@@ -6,6 +6,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tonic_build::configure().compile_with_config(
         config,
-        &["src/proto/star_gate.proto"], &["src/proto"])?;
+        &["src/proto/cedar_detect.proto"], &["src/proto"])?;
     Ok(())
 }
