@@ -1518,6 +1518,30 @@ mod tests {
     }
 
     #[test]
+    fn test_gate_star_1d_three_bright() {
+        // Three equally bright pixels, left pixel.
+        let mut gate: [u8; 7] = [10, 10, 10, 18, 18, 18, 10];
+        let (mut value, mut result_type) =
+            gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_1_5=*/4, false);
+        assert_eq!(value, 18);
+        assert_eq!(result_type, ResultType::Uninteresting);
+
+        // Middle pixel.
+        gate = [10, 10, 18, 18, 18, 10, 10];
+        (value, result_type) =
+            gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_1_5=*/4, false);
+        assert_eq!(value, 18);
+        assert_eq!(result_type, ResultType::Candidate);
+
+        // Right pixel.
+        gate = [10, 18, 18, 18, 10, 10, 10];
+        (value, result_type) =
+            gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_1_5=*/4, false);
+        assert_eq!(value, 18);
+        assert_eq!(result_type, ResultType::Uninteresting);
+    }
+
+    #[test]
     fn test_create_binned_image() {
         // Test the create_binned_image10 aspect of scan_image_for_candidates().
         // Even dimensions, no hot pixel.
