@@ -29,7 +29,7 @@ struct Args {
     sigma: f32,
 
     /// Maximum star size.
-    #[arg(short, long, default_value_t = 5)]
+    #[arg(short, long, default_value_t = 8)]
     max_size: u32,
 
     /// Whether image should be 2x2 binned prior to star detection.
