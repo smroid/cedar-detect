@@ -27,5 +27,8 @@ prost-build = "0.11.9"
 
 [profile.release]
 # See https://github.com/johnthagen/min-sized-rust.
+# Separate step: use
+#   upx --best --lzma target/release/cedar-detect-server
+# to make a self-extracting compressed binary.
 strip = true
 lto = true
