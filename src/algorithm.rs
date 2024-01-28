@@ -1075,8 +1075,9 @@ fn stats_for_histogram(histogram: &[u32; 1024])
 ///   `max_size` - CedarDetect clumps adjacent bright pixels to form a single star
 ///   candidate. The `max_size` argument governs how large a clump can be before
 ///   it is rejected. Note that making `max_size` small can eliminate very
-///   bright stars that "bleed" to many surrounding pixels. Typical `max_size`
-///   values: 3-5.
+///   bright stars that "bleed" to many surrounding pixels. `max_size` is always
+///   given in full-resolution units, even if `use_binned_image` is true.
+///   Typical `max_size` value: 8.
 ///
 ///   `use_binned_image` If true a 2x2 binning of `image` (with hot pixels
 ///   removed) is used for star detection. Note that computing the centroids of
