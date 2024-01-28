@@ -304,10 +304,10 @@ where u16: From<P>
     }
     // We require the border pixels to be ~uniformly dark. See if there is too
     // much brightness difference between the border pixels.
-    // The 3/2 sigma_noise threshold is empirically chosen to yield a low
+    // The 2x sigma_noise threshold is empirically chosen to yield a low
     // rejection rate for actual sky background border pixels.
     let border_diff = (lb - rb).abs();
-    if border_diff > sigma_noise_1_5 {
+    if border_diff > sigma_noise_2 {
         return (gate[3], ResultType::Uninteresting);
     }
     // We have a candidate star from our 1d analysis!
@@ -796,10 +796,10 @@ where i32: From<P>
     // We require the perimeter pixels to be ~uniformly dark. See if any
     // perimeter pixel is too bright compared to the darkest perimeter
     // pixel.
-    // The 3/2 sigma_noise threshold is empirically chosen to yield a low
+    // The 2x sigma_noise threshold is empirically chosen to yield a low
     // rejection rate for actual sky background perimeter pixels.
     if (i32::from(perimeter_max) - i32::from(perimeter_min)) as f32 >
-        1.5 * sigma * noise_estimate {
+        2.0 * sigma * noise_estimate {
         debug!("Perimeter too varied for blob {:?}", core);
         return None;
     }
