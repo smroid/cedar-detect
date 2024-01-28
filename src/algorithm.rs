@@ -821,6 +821,10 @@ where i32: From<P>
 
     // Star passes all of the 2d gates!
 
+    let brightness;
+    let num_saturated;
+    let x;
+    let y;
     if image_width < full_res_image.dimensions().0 {
         // The `image` is binned. Compute moments using the full-res image.
         // Translate the margin (in the binned image) to the full-res image.
@@ -834,15 +838,23 @@ where i32: From<P>
                                   full_res_image.height()) - top;
         let full_res_margin =
             Rect::at(left as i32, top as i32).of_size(adj_width, adj_height);
-        Some(compute_moments(full_res_image, &full_res_margin))
+        (brightness, num_saturated) = compute_brightness(full_res_image, &full_res_margin);
+        (x, y) = compute_peak_coord(full_res_image, &full_res_margin);
     } else {
-        Some(compute_moments(full_res_image, &margin))
+        (brightness, num_saturated) = compute_brightness(full_res_image, &margin);
+        (x, y) = compute_peak_coord(full_res_image, &margin);
     }
+    Some(StarDescription{centroid_x: x + 0.5,
+                         centroid_y: y + 0.5,
+                         brightness, num_saturated})
 }
 
-// Computes zeroeth moment (brightness) and first moment (position) of the
-// `image` pixel values in the given `bounding_box`.
-fn compute_moments(image: &GrayImage, bounding_box: &Rect) -> StarDescription {
+// Computes the background-subtracted brightness of the 2d image region.
+// The outer perimeter of the bounding box is used for background
+// estimation; the inner pixels of the bounding box are background
+// subtracted and summed to form the brightness value.
+// Returns: (summed pixel values, count of saturated pixels)
+fn compute_brightness(image: &GrayImage, bounding_box: &Rect) -> (f32, u16) {
     let mut boundary_sum: i32 = 0;
     let mut boundary_count: i32 = 0;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
@@ -856,52 +868,74 @@ fn compute_moments(image: &GrayImage, bounding_box: &Rect) -> StarDescription {
         .of_size(bounding_box.width() - 2, bounding_box.height() - 2);
 
     let mut num_saturated = 0;
-    let mut m0 = 0.0;
-    let mut m1x = 0.0;
-    let mut m1y = 0.0;
-    for (x, y, pixel_value) in EnumeratePixels::new(
+    let mut sum = 0.0;
+    for (_x, _y, pixel_value) in EnumeratePixels::new(
         &image, &inset, /*include_interior=*/true) {
         if pixel_value == 255_u8 {
             num_saturated += 1;
         }
-        let val = pixel_value as f32 - background_est;
-        m0 += val;
-        m1x += x as f32 * val;
-        m1y += y as f32 * val;
+        sum += pixel_value as f32 - background_est;
     }
-    // Very unlikely, but return something sensible.
-    if m0 <= 0.0 {
-        return StarDescription{
-            centroid_x: inset.left() as f32 + inset.width() as f32 / 2.0,
-            centroid_y: inset.top() as f32 + inset.height() as f32 / 2.0,
-            brightness: 0.0,
-            num_saturated};
+    (f32::max(sum, 0.0), num_saturated)
+}
+
+// Computes the position of the peak, with sub-pixel interpolation.
+fn compute_peak_coord(image: &GrayImage, bounding_box: &Rect) -> (f32, f32) {
+    let mut horizontal_projection = vec![0u32; bounding_box.width() as usize];
+    let mut vertical_projection = vec![0u32; bounding_box.height() as usize];
+    let x0 = bounding_box.left();
+    let y0 = bounding_box.top();
+    for (x, y, pixel_value) in EnumeratePixels::new(
+        &image, &bounding_box, /*include_interior=*/true) {
+        horizontal_projection[(x - x0) as usize] += pixel_value as u32;
+        vertical_projection[(y - y0) as usize] += pixel_value as u32;
+    }
+    let peak_x = x0 as f32 + peak_coord_1d(horizontal_projection);
+    let peak_y = y0 as f32 + peak_coord_1d(vertical_projection);
+    (peak_x, peak_y)
+}
+
+fn peak_coord_1d(values: Vec<u32>) -> f32 {
+    // We want a single peak value with lesser neighbors.
+    let mut peak_val = 0;
+    let mut peak_ind = 0;
+    let mut in_run = false;
+    let mut peak_run_length = 0;
+    for (ind, val) in values.iter().enumerate() {
+        if *val > peak_val || ind == 0 {
+            peak_val = *val;
+            peak_ind = ind;
+            peak_run_length = 1;
+            in_run = true;
+        } else if *val == peak_val {
+            if in_run {
+                peak_run_length += 1;
+            }
+        } else {
+            in_run = false;
+        }
     }
 
-    // We use simple center-of-mass as the centroid.
-    let mut centroid_x = m1x / m0;
-    let mut centroid_y = m1y / m0;
-
-    // Clamp the centroid to the inset. When the box contents are
-    // ~flat the computed centroid can dance beyond the boundary.
-    if centroid_x < inset.left() as f32 {
-        centroid_x = inset.left() as f32 ;
+    // If we have a run of equal-length values, just return the mid-coord of the
+    // run. Yuck.
+    if peak_run_length > 1 {
+        return peak_ind as f32 + (peak_run_length - 1) as f32 / 2.0;
     }
-    if centroid_x > inset.right()  as f32 {
-        centroid_x = inset.right() as f32 ;
-    }
-    if centroid_y < inset.top()  as f32 {
-        centroid_y = inset.top() as f32 ;
-    }
-    if centroid_y > inset.bottom()  as f32 {
-        centroid_y = inset.bottom() as f32 ;
+    // If our peak is at either end of the vector, just return its coord. Yuck.
+    if peak_ind == 0 || peak_ind == values.len() - 1 {
+        return peak_ind as f32;
     }
 
-    StarDescription{
-        centroid_x: (centroid_x + 0.5) as f32,
-        centroid_y: (centroid_y + 0.5) as f32,
-        brightness: m0,
-        num_saturated}
+    // We have a peak with two lesser neighbors. Apply quadratic interpolation.
+    // https://ccrma.stanford.edu/~jos/sasp/Quadratic_Interpolation_Spectral_Peaks.html
+    let a = values[peak_ind - 1] as f32;
+    let b = values[peak_ind] as f32;
+    let c = values[peak_ind + 1] as f32;
+    let p = 0.5 * (a - c) / (a - 2.0 * b + c);
+    assert!(p >= -0.5);
+    assert!(p <= 0.5);
+
+    peak_ind as f32 + p
 }
 
 /// Estimates the RMS noise of the given image. A small portion of the image
@@ -1224,11 +1258,11 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
 
     // Apply centroiding to get sub-pixel resolution for peak_x/y.
     let bounding_box = Rect::at(peak_x - 3, peak_y - 3).of_size(7, 7);
-    let moments = compute_moments(&cleaned_image, &bounding_box);
+    let (x, y) = compute_peak_coord(&cleaned_image, &bounding_box);
     debug!("ROI processing completed in {:?}", process_roi_start.elapsed());
     RegionOfInterestSummary{histogram,
-                            peak_x: moments.centroid_x,
-                            peak_y: moments.centroid_y}
+                            peak_x: x + 0.5,
+                            peak_y: y + 0.5}
 }
 
 #[cfg(test)]
@@ -1503,14 +1537,14 @@ mod tests {
     #[test]
     fn test_gate_star_1d_unequal_border() {
         // Border pixels differ too much, so candidate is rejected.
-        let mut gate: [u8; 7] = [12, 10, 12, 18, 13, 10, 7];
+        let mut gate: [u8; 7] = [14, 10, 12, 18, 13, 10, 5];
         let (mut value, mut result_type) =
             gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_1_5=*/4, false);
         assert_eq!(value, 18);
         assert_eq!(result_type, ResultType::Uninteresting);
 
         // Borders are close enough now.
-        gate = [11, 10, 12, 18, 13, 10, 7];
+        gate = [13, 10, 12, 18, 13, 10, 6];
         (value, result_type) =
             gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_1_5=*/4, false);
         assert_eq!(value, 18);
@@ -1863,7 +1897,7 @@ mod tests {
         let mut image_7x7 = gray_image!(
         9,  9,  9,  9,  9,  9,  9;
         9, 10, 10, 10, 10, 10,  9;
-       20, 10, 12, 15, 12, 10,  9;
+       22, 10, 12, 15, 12, 10,  9;
         9, 10, 15, 30, 15, 10,  9;
         9, 10, 12, 15, 12, 10,  9;
         9, 10, 10, 10, 10, 10,  9;
@@ -1942,7 +1976,39 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_moments() {
+    fn test_peak_coord_1d() {
+        // All zeroes.
+        let values = vec![0, 0, 0, 0, 0];
+        assert_eq!(peak_coord_1d(values), 2.0);
+
+        // All same value.
+        let values = vec![10, 10, 10, 10, 10];
+        assert_eq!(peak_coord_1d(values), 2.0);
+
+        // Run of two peak values. Disjoint peak value later in vector
+        // does not extend the run.
+        let values = vec![1, 2, 2, 1, 2];
+        assert_eq!(peak_coord_1d(values), 1.5);
+
+        // Peak is left-most position.
+        let values = vec![12, 2, 2, 1, 2];
+        assert_eq!(peak_coord_1d(values), 0.0);
+
+        // Peak is right-most position.
+        let values = vec![12, 2, 2, 1, 22];
+        assert_eq!(peak_coord_1d(values), 4.0);
+
+        // Quadratic interpolation cases.
+        let values = vec![1, 3, 10, 3, 2];
+        assert_eq!(peak_coord_1d(values), 2.0);
+        let values = vec![1, 3, 10, 5, 2];
+        assert_abs_diff_eq!(peak_coord_1d(values), 2.1, epsilon = 0.05);
+        let values = vec![1, 9, 10, 0, 2];
+        assert_abs_diff_eq!(peak_coord_1d(values), 1.6, epsilon = 0.05);
+    }
+
+    #[test]
+    fn test_brightness() {
         let image_7x7 = gray_image!(
         9,  9,  9,   9,  9,  9,  9;
         9, 10, 10,  10, 10, 10,  9;
@@ -1952,14 +2018,10 @@ mod tests {
         9, 10, 10,  10, 10, 10,  9;
         9,  9,  9,   9,  9,  9,  9);
         let neighbors = Rect::at(1, 1).of_size(5, 5);
-        let star_description = compute_moments(&image_7x7, &neighbors);
-        assert_abs_diff_eq!(star_description.centroid_x,
-                            3.53, epsilon = 0.01);
-        assert_abs_diff_eq!(star_description.centroid_y,
-                            3.07, epsilon = 0.01);
-        assert_abs_diff_eq!(star_description.brightness,
+        let (brightness, num_sat) = compute_brightness(&image_7x7, &neighbors);
+        assert_abs_diff_eq!(brightness,
                             528.0, epsilon = 0.1);
-        assert_eq!(star_description.num_saturated, 2);
+        assert_eq!(num_sat, 2);
     }
 
     #[test]
@@ -2023,9 +2085,9 @@ mod tests {
         assert_eq!(roi_summary.histogram[32], 1);
         // The hot pixel is not the peak.
         assert_abs_diff_eq!(roi_summary.peak_x,
-                            5.23, epsilon = 0.01);
+                            5.37, epsilon = 0.01);
         assert_abs_diff_eq!(roi_summary.peak_y,
-                            4.58, epsilon = 0.01);
+                            4.52, epsilon = 0.01);
     }
 
 }  // mod tests.
