@@ -220,7 +220,7 @@ impl<'a, P: Primitive> Iterator for EnumeratePixels<'a, P> {
 //
 // Statistical significance is defined as a 'sigma' multiple of the measured
 // image noise level. The `sigma_noise_2` argument is 2x the sigma*noise value,
-// and the `sigma_noise_1_5` argument is 1.5x the sigma*noise value.
+// and the `sigma_noise_3` argument is 3x the sigma*noise value.
 //
 // The `detect_hot_pixels` argument determines whether hot pixel
 // detection/substitution is done.
@@ -240,14 +240,14 @@ enum ResultType {
 
 // P: u8 (original) or u16 (2x2 binned).
 fn gate_star_1d<P: Primitive + std::fmt::Debug>(
-    gate: &[P], sigma_noise_2: i16, sigma_noise_1_5: i16,
+    gate: &[P], sigma_noise_2: i16, sigma_noise_3: i16,
     detect_hot_pixels: bool)
     -> (/*corrected_value*/P, ResultType)
 where u16: From<P>
 {
     debug_assert!(sigma_noise_2 > 0);
-    debug_assert!(sigma_noise_1_5 > 0);
-    debug_assert!(sigma_noise_1_5 <= sigma_noise_2);
+    debug_assert!(sigma_noise_3 > 0);
+    debug_assert!(sigma_noise_2 <= sigma_noise_3);
     // Examining assembler output suggests that fetching these exterior pixels
     // first eliminates bounds checks on the interior pixels. I would have
     // thought that the compiler would do this... in any case, the measured
@@ -304,10 +304,10 @@ where u16: From<P>
     }
     // We require the border pixels to be ~uniformly dark. See if there is too
     // much brightness difference between the border pixels.
-    // The 2x sigma_noise threshold is empirically chosen to yield a low
+    // The 3x sigma_noise threshold is empirically chosen to yield a low
     // rejection rate for actual sky background border pixels.
     let border_diff = (lb - rb).abs();
-    if border_diff > sigma_noise_2 {
+    if border_diff > sigma_noise_3 {
         return (gate[3], ResultType::Uninteresting);
     }
     // We have a candidate star from our 1d analysis!
@@ -367,7 +367,7 @@ where u16: From<P>
     let image_pixels: &Vec<P> = image.as_raw();
     let mut candidates = Vec::<CandidateFrom1D>::new();
     let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate + 0.5) as i16, 2);
-    let sigma_noise_1_5 = cmp::max((1.5 * sigma * noise_estimate + 0.5) as i16, 1);
+    let sigma_noise_3 = cmp::max((3.0 * sigma * noise_estimate + 0.5) as i16, 1);
 
     let (binned_width, binned_height) = (width / 2, height / 2);
     let mut binned_image10_data = Vec::<u16>::new();
@@ -409,7 +409,7 @@ where u16: From<P>
             for gate in row_pixels.windows(7) {
                 center_x += 1;
                 let (pixel_value, result_type) = gate_star_1d(
-                    gate, sigma_noise_2, sigma_noise_1_5, detect_hot_pixels);
+                    gate, sigma_noise_2, sigma_noise_3, detect_hot_pixels);
                 binned_slice[center_x / 2] += u16::from(pixel_value);
                 match result_type {
                     ResultType::Uninteresting => (),
@@ -446,7 +446,7 @@ where u16: From<P>
             for gate in row_pixels.windows(7) {
                 center_x += 1;
                 let (_pixel_value, result_type) = gate_star_1d(
-                    gate, sigma_noise_2, sigma_noise_1_5, detect_hot_pixels);
+                    gate, sigma_noise_2, sigma_noise_3, detect_hot_pixels);
                 match result_type {
                     ResultType::Uninteresting => (),
                     ResultType::Candidate => {
@@ -796,10 +796,10 @@ where i32: From<P>
     // We require the perimeter pixels to be ~uniformly dark. See if any
     // perimeter pixel is too bright compared to the darkest perimeter
     // pixel.
-    // The 2x sigma_noise threshold is empirically chosen to yield a low
+    // The 3x sigma_noise threshold is empirically chosen to yield a low
     // rejection rate for actual sky background perimeter pixels.
     if (i32::from(perimeter_max) - i32::from(perimeter_min)) as f32 >
-        2.0 * sigma * noise_estimate {
+        3.0 * sigma * noise_estimate {
         debug!("Perimeter too varied for blob {:?}", core);
         return None;
     }
@@ -1232,7 +1232,7 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
     let mut cleaned_image = image.clone();
 
     let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate) as i16, 2);
-    let sigma_noise_1_5 = cmp::max((1.5 * sigma * noise_estimate) as i16, 1);
+    let sigma_noise_3 = cmp::max((3.0 * sigma * noise_estimate) as i16, 1);
     for rownum in roi.top()..=roi.bottom() {
         // Get the slice of image_pixels corresponding to this row of the ROI.
         let row_start = (rownum * width as i32) as usize;
@@ -1243,7 +1243,7 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
         let mut center_x = roi.left();
         for gate in row_pixels.windows(7) {
             let (pixel_value, _result_type) =
-                gate_star_1d(gate, sigma_noise_2, sigma_noise_1_5,
+                gate_star_1d(gate, sigma_noise_2, sigma_noise_3,
                              /*detect_hot_pixels=*/true);
             cleaned_image.put_pixel(center_x as u32, rownum as u32,
                                     Luma::<u8>([pixel_value]));
@@ -1400,14 +1400,14 @@ mod tests {
         // Center minus background not bright enough.
         let mut gate: [u8; 7] = [10, 10, 10, 12, 10, 10, 10];
         let (mut value, mut result_type) =
-            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_1_5=*/3, false);
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_3=*/7, false);
         assert_eq!(value, 12);
         assert_eq!(result_type, ResultType::Uninteresting);
 
         // Center minus background is bright enough.
         gate = [10, 10, 11, 13, 11, 10, 10];
         (value, result_type) =
-            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_1_5=*/3, false);
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_3=*/7, false);
         assert_eq!(value, 13);
         assert_eq!(result_type, ResultType::Candidate);
     }
@@ -1417,14 +1417,14 @@ mod tests {
         // Center is less than a neighbor.
         let mut gate: [u8; 7] = [10, 10, 11, 13, 14, 10, 10];
         let (mut value, mut result_type) =
-            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_1_5=*/3, false);
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_3=*/7, false);
         assert_eq!(value, 13);
         assert_eq!(result_type, ResultType::Uninteresting);
 
         // Ditto, other neighbor.
         gate = [10, 10, 14, 13, 11, 10, 10];
         (value, result_type) =
-            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_1_5=*/3, false);
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_3=*/7, false);
         assert_eq!(value, 13);
         assert_eq!(result_type, ResultType::Uninteresting);
 
@@ -1432,7 +1432,7 @@ mod tests {
         // left (current candidate); this is explored further below.
         gate = [10, 10, 11, 13, 13, 10, 10];
         (value, result_type) =
-            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_1_5=*/3, false);
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_3=*/7, false);
         assert_eq!(value, 13);
         assert_eq!(result_type, ResultType::Candidate);
     }
@@ -1442,21 +1442,21 @@ mod tests {
         // Center is not brighter than a margin.
         let mut gate: [u8; 7] = [10, 10, 11, 13, 11, 13, 10];
         let (mut value, mut result_type) =
-            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_1_5=*/3, false);
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_3=*/7, false);
         assert_eq!(value, 13);
         assert_eq!(result_type, ResultType::Uninteresting);
 
         // Ditto, other margin.
         gate = [10, 13, 11, 13, 11, 10, 10];
         (value, result_type) =
-            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_1_5=*/3, false);
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_3=*/7, false);
         assert_eq!(value, 13);
         assert_eq!(result_type, ResultType::Uninteresting);
 
         // Center brighter than both margins.
         gate = [10, 12, 11, 13, 11, 12, 10];
         (value, result_type) =
-            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_1_5=*/3, false);
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_3=*/7, false);
         assert_eq!(value, 13);
         assert_eq!(result_type, ResultType::Candidate);
     }
@@ -1468,14 +1468,14 @@ mod tests {
         // In this case, the tie breaks to the left.
         let mut gate: [u8; 7] = [10, 11, 13, 13, 10, 11, 10];
         let (mut value, mut result_type) =
-            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_1_5=*/3, false);
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_3=*/7, false);
         assert_eq!(value, 13);
         assert_eq!(result_type, ResultType::Uninteresting);
 
         // Here, the tie breaks to the right (center pixel).
         gate = [10, 11, 13, 13, 11, 11, 10];
         (value, result_type) =
-            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_1_5=*/3, false);
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_3=*/7, false);
         assert_eq!(value, 13);
         assert_eq!(result_type, ResultType::Candidate);
     }
@@ -1487,14 +1487,14 @@ mod tests {
         // In this case, the tie breaks to the right.
         let mut gate: [u8; 7] = [10, 11, 11, 13, 13, 11, 10];
         let (mut value, mut result_type) =
-            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_1_5=*/3, false);
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_3=*/7, false);
         assert_eq!(value, 13);
         assert_eq!(result_type, ResultType::Uninteresting);
 
         // Here, the tie breaks to the left (center pixel).
         gate = [10, 11, 11, 13, 13, 10, 10];
         (value, result_type) =
-            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_1_5=*/3, false);
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_3=*/7, false);
         assert_eq!(value, 13);
         assert_eq!(result_type, ResultType::Candidate);
     }
@@ -1504,7 +1504,7 @@ mod tests {
         // Neighbors are too dark, so bright center is deemed a hot pixel.
         let mut gate: [u8; 7] = [10, 10, 10, 15, 12, 10, 10];
         let (mut value, mut result_type) =
-            gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_1_5=*/4, true);
+            gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_3=*/9, true);
         assert_eq!(value, 11);
         assert_eq!(result_type, ResultType::HotPixel);
 
@@ -1512,7 +1512,7 @@ mod tests {
         // star candidate.
         gate = [10, 10, 12, 15, 12, 10, 10];
         (value, result_type) =
-            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_1_5=*/2, true);
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_3=*/7, true);
         assert_eq!(value, 15);
         assert_eq!(result_type, ResultType::Candidate);
     }
@@ -1522,7 +1522,7 @@ mod tests {
         // As abovbe, except hot pixel processing is disabled.
         let mut gate: [u8; 7] = [10, 10, 10, 15, 12, 10, 10];
         let (mut value, mut result_type) =
-            gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_1_5=*/4, false);
+            gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_3=*/9, false);
         assert_eq!(value, 15);  // Hot pixel not substituted.
         assert_eq!(result_type, ResultType::Candidate);
 
@@ -1530,7 +1530,7 @@ mod tests {
         // star candidate.
         gate = [10, 10, 12, 15, 12, 10, 10];
         (value, result_type) =
-            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_1_5=*/2, false);
+            gate_star_1d(&gate, /*sigma_noise_2=*/5, /*sigma_noise_3=*/7, false);
         assert_eq!(value, 15);
         assert_eq!(result_type, ResultType::Candidate);
     }
@@ -1538,16 +1538,16 @@ mod tests {
     #[test]
     fn test_gate_star_1d_unequal_border() {
         // Border pixels differ too much, so candidate is rejected.
-        let mut gate: [u8; 7] = [14, 10, 12, 18, 13, 10, 5];
+        let mut gate: [u8; 7] = [15, 10, 12, 18, 13, 10, 4];
         let (mut value, mut result_type) =
-            gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_1_5=*/4, false);
+            gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_3=*/9, false);
         assert_eq!(value, 18);
         assert_eq!(result_type, ResultType::Uninteresting);
 
         // Borders are close enough now.
         gate = [13, 10, 12, 18, 13, 10, 6];
         (value, result_type) =
-            gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_1_5=*/4, false);
+            gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_3=*/9, false);
         assert_eq!(value, 18);
         assert_eq!(result_type, ResultType::Candidate);
     }
@@ -1557,21 +1557,21 @@ mod tests {
         // Three equally bright pixels, left pixel.
         let mut gate: [u8; 7] = [10, 10, 10, 18, 18, 18, 10];
         let (mut value, mut result_type) =
-            gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_1_5=*/4, false);
+            gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_3=*/9, false);
         assert_eq!(value, 18);
         assert_eq!(result_type, ResultType::Uninteresting);
 
         // Middle pixel.
         gate = [10, 10, 18, 18, 18, 10, 10];
         (value, result_type) =
-            gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_1_5=*/4, false);
+            gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_3=*/9, false);
         assert_eq!(value, 18);
         assert_eq!(result_type, ResultType::Candidate);
 
         // Right pixel.
         gate = [10, 18, 18, 18, 10, 10, 10];
         (value, result_type) =
-            gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_1_5=*/4, false);
+            gate_star_1d(&gate, /*sigma_noise_2=*/7, /*sigma_noise_3=*/9, false);
         assert_eq!(value, 18);
         assert_eq!(result_type, ResultType::Uninteresting);
     }
@@ -1898,7 +1898,7 @@ mod tests {
         let mut image_7x7 = gray_image!(
         9,  9,  9,  9,  9,  9,  9;
         9, 10, 10, 10, 10, 10,  9;
-       22, 10, 12, 15, 12, 10,  9;
+       26, 10, 12, 15, 12, 10,  9;
         9, 10, 15, 30, 15, 10,  9;
         9, 10, 12, 15, 12, 10,  9;
         9, 10, 10, 10, 10, 10,  9;
