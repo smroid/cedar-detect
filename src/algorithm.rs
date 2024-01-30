@@ -1119,18 +1119,16 @@ pub fn get_stars_from_image(
     if use_binned_image {
         let binned_noise_estimate = estimate_noise_from_image(
             &binned_image10.as_ref().unwrap());
-        // Use a higher noise floor for 10-bit binned image.
-        let noise_estimate10 = f32::max(binned_noise_estimate, 1.5);
         let (candidates, _, _, _) =
             scan_image_for_candidates(&binned_image10.as_ref().unwrap(),
-                                      noise_estimate10, sigma,
+                                      binned_noise_estimate, sigma,
                                       /*detect_hot_pixels=*/false,
                                       /*create_binned_image10=*/false,
                                       /*create_binned_image8=*/false);
         for blob in form_blobs_from_candidates(candidates) {
             match gate_star_2d(&blob, &binned_image10.as_ref().unwrap(),
                                /*full_res_image=*/image,
-                               noise_estimate10, sigma,
+                               binned_noise_estimate, sigma,
                                /*detect_hot_pixels=*/false,
                                max_size/2 + 1, max_size/2 + 1) {
                 Some(x) => stars.push(x),
