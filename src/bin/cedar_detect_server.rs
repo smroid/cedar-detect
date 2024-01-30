@@ -1,12 +1,13 @@
 use std::ffi::CString;
+use std::io::Error;
 use std::net::SocketAddr;
 use std::time::Instant;
 
 use clap::Parser;
 use env_logger;
 use image::{GrayImage};
-use libc::{close, mmap, shm_open, O_RDONLY, PROT_READ, MAP_SHARED};
-use log::{info};
+use libc::{c_void, close, mmap, munmap, shm_open, O_RDONLY, PROT_READ, MAP_FAILED, MAP_SHARED};
+use log::{debug, info, warn};
 
 use ::cedar_detect::algorithm::{estimate_noise_from_image, get_stars_from_image};
 use crate::cedar_detect::cedar_detect_server::{CedarDetect, CedarDetectServer};
@@ -39,14 +40,25 @@ impl CedarDetect for MyCedarDetect {
 
         let req_image;
         let mut fd = 0;
+        let mut addr: *mut c_void = std::ptr::null_mut();
+        let mut num_pixels = 0;
         let using_shmem = input_image.shmem_name.is_some();
         if using_shmem {
-            let num_pixels = (input_image.width * input_image.height) as usize;
+            num_pixels = (input_image.width * input_image.height) as usize;
             let name = CString::new(input_image.shmem_name.unwrap()).unwrap();
+            debug!("Using shared memory at {:?}", name);
             unsafe {
                 fd = shm_open(name.as_ptr(), O_RDONLY, 0);
-                let addr = mmap(std::ptr::null_mut(), num_pixels, PROT_READ,
-                                MAP_SHARED, fd, 0);
+                if fd < 0 {
+                    panic!("Could not open shared memory at {:?}: {:?}",
+                           name, Error::last_os_error().raw_os_error().unwrap());
+                }
+                addr = mmap(std::ptr::null_mut(), num_pixels, PROT_READ,
+                            MAP_SHARED, fd, 0);
+                if addr == MAP_FAILED {
+                    panic!("Could not mmap shared memory at {:?} for {} bytes: {:?}",
+                           name, num_pixels, Error::last_os_error().raw_os_error().unwrap());
+                }
                 // We are violating the invariant that 'addr' must have been
                 // allocated using the global allocator. This is OK because our
                 // usage of the vector (within GrayImage) is read-only, so there
@@ -74,7 +86,16 @@ impl CedarDetect for MyCedarDetect {
             // Deconstruct req_image that is referencing shared memory.
             let vec_shmem = req_image.into_raw();
             vec_shmem.leak();  // vec_shmem no longer "owns" the shared memory.
-            unsafe { close(fd); }
+            unsafe {
+                if munmap(addr, num_pixels) == -1 {
+                    warn!("Could not munmap shared memory: {:?}",
+                          Error::last_os_error().raw_os_error().unwrap());
+                }
+                if close(fd) == -1 {
+                    warn!("Could not close shared memory file: {:?}",
+                          Error::last_os_error().raw_os_error().unwrap());
+                }
+            }
         }
 
         let mut candidates = Vec::<cedar_detect::StarCentroid>::new();
