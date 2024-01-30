@@ -50,13 +50,13 @@ impl CedarDetect for MyCedarDetect {
             unsafe {
                 fd = shm_open(name.as_ptr(), O_RDONLY, 0);
                 if fd < 0 {
-                    panic!("Could not open shared memory at {:?}: {:?}",
+                    panic!("Could not open shared memory at {:?}: errno {}",
                            name, Error::last_os_error().raw_os_error().unwrap());
                 }
                 addr = mmap(std::ptr::null_mut(), num_pixels, PROT_READ,
                             MAP_SHARED, fd, 0);
                 if addr == MAP_FAILED {
-                    panic!("Could not mmap shared memory at {:?} for {} bytes: {:?}",
+                    panic!("Could not mmap shared memory at {:?} for {} bytes: errno {}",
                            name, num_pixels, Error::last_os_error().raw_os_error().unwrap());
                 }
                 // We are violating the invariant that 'addr' must have been
@@ -88,11 +88,11 @@ impl CedarDetect for MyCedarDetect {
             vec_shmem.leak();  // vec_shmem no longer "owns" the shared memory.
             unsafe {
                 if munmap(addr, num_pixels) == -1 {
-                    warn!("Could not munmap shared memory: {:?}",
+                    warn!("Could not munmap shared memory: errno {}",
                           Error::last_os_error().raw_os_error().unwrap());
                 }
                 if close(fd) == -1 {
-                    warn!("Could not close shared memory file: {:?}",
+                    warn!("Could not close shared memory file: errno {}",
                           Error::last_os_error().raw_os_error().unwrap());
                 }
             }
