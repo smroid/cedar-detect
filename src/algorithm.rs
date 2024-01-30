@@ -346,6 +346,7 @@ struct CandidateFrom1D {
 //   image is returned here.
 // Option<GrayImage>: if `create_binned_image8` is true, the 8 bit binned image
 //   is returned here.
+// P: the peak pixel value of the identified star candidates.
 //
 // P: u8 (original) or u16 (2x2 binned).
 fn scan_image_for_candidates<P: Primitive + std::fmt::Debug>(
@@ -357,11 +358,13 @@ fn scan_image_for_candidates<P: Primitive + std::fmt::Debug>(
     -> (Vec<CandidateFrom1D>,
         /*hot_pixel_count*/i32,
         Option<Gray16Image>,
-        Option<GrayImage>)
+        Option<GrayImage>,
+        /*peak_star_pixel*/P)
 where u16: From<P>
 {
     let row_scan_start = Instant::now();
     let mut hot_pixel_count = 0;
+    let mut peak_star_pixel = P::from(0).unwrap();
     let width = image.dimensions().0 as usize;
     let height = image.dimensions().1 as usize;
     let image_pixels: &Vec<P> = image.as_raw();
@@ -416,6 +419,9 @@ where u16: From<P>
                     ResultType::Candidate => {
                         candidates.push(CandidateFrom1D{x: center_x as i32,
                                                         y: rownum as i32});
+                        if pixel_value > peak_star_pixel {
+                            peak_star_pixel = pixel_value;
+                        }
                     },
                     ResultType::HotPixel => { hot_pixel_count += 1; },
                 }
@@ -445,13 +451,16 @@ where u16: From<P>
             // Slide a 7 pixel gate across the row.
             for gate in row_pixels.windows(7) {
                 center_x += 1;
-                let (_pixel_value, result_type) = gate_star_1d(
+                let (pixel_value, result_type) = gate_star_1d(
                     gate, sigma_noise_2, sigma_noise_3, detect_hot_pixels);
                 match result_type {
                     ResultType::Uninteresting => (),
                     ResultType::Candidate => {
                         candidates.push(CandidateFrom1D{x: center_x as i32,
                                                         y: rownum as i32});
+                        if pixel_value > peak_star_pixel {
+                            peak_star_pixel = pixel_value;
+                        }
                     },
                     ResultType::HotPixel => { hot_pixel_count += 1; },
                 }
@@ -472,7 +481,7 @@ where u16: From<P>
             binned_width as u32, binned_height as u32,
             binned_image8_data).unwrap());
     }
-    (candidates, hot_pixel_count, binned10_result, binned8_result)
+    (candidates, hot_pixel_count, binned10_result, binned8_result, peak_star_pixel)
 }
 
 #[derive(Debug)]
@@ -828,7 +837,7 @@ where i32: From<P>
     if image_width < full_res_image.dimensions().0 {
         // The `image` is binned. Compute moments using the full-res image.
         // Translate the margin (in the binned image) to the full-res image.
-        let left: u32 = margin.left() as u32 * 2;
+        let left = margin.left() as u32 * 2;
         let top = margin.top() as u32 * 2;
         let width = margin.width() * 2;
         let height = margin.height() * 2;
@@ -1094,41 +1103,44 @@ fn stats_for_histogram(histogram: &[u32; 1024])
 ///
 /// Option<GrayImage>: if `return_binned_image` is true, the 2x2 binning of `image`
 ///   is returned.
+///
+/// u8: the peak pixel value of the identified star candidates.
 pub fn get_stars_from_image(
     image: &GrayImage,
     noise_estimate: f32, sigma: f32, max_size: u32,
     use_binned_image: bool,
     return_binned_image: bool)
-    -> (Vec<StarDescription>, /*hot_pixel_count*/i32, Option<GrayImage>) {
+    -> (Vec<StarDescription>, /*hot_pixel_count*/i32, Option<GrayImage>, /*peak_star_pixel*/u8) {
     // If noise estimate is below 0.5, assume that the image background has been
     // crushed to black; use a minimum noise value.
     let noise_estimate8 = f32::max(noise_estimate, 0.5);
 
-    let mut binned_image10: Option<Gray16Image> = None;
-    let mut binned_image8: Option<GrayImage> = None;
-    let mut hot_pixel_count = 0;
-    if use_binned_image || return_binned_image {
-        (_, hot_pixel_count, binned_image10, binned_image8) =
-            scan_image_for_candidates(image, noise_estimate8, sigma,
-                                      /*detect_hot_pixels=*/true,
-                                      /*create_binned_image10=*/true,
-                                      /*create_binned_image8=*/return_binned_image);
-    }
-
     let mut stars = Vec::<StarDescription>::new();
+
+    let (candidates, hot_pixel_count, binned_image10, binned_image8, peak_star_pixel) =
+        scan_image_for_candidates(image, noise_estimate8, sigma,
+                                  /*detect_hot_pixels=*/true,
+                                  /*create_binned_image10=*/use_binned_image,
+                                  /*create_binned_image8=*/return_binned_image);
     if use_binned_image {
-        let binned_noise_estimate = estimate_noise_from_image(
+        let noise_estimate10 = estimate_noise_from_image(
             &binned_image10.as_ref().unwrap());
-        let (candidates, _, _, _) =
+        // If noise estimate is below 1.0, assume that the image background has
+        // been crushed to black; use a minimum noise value. We use 1.0 because
+        // while the binning increases pixel values by 4x, it only boosts the noise
+        // by 2x. We thus use twice the noise floor of the noise_estimate_8.
+        let noise_estimate10 = f32::max(noise_estimate10, 1.0);
+
+        let (candidates_from_binned, _, _, _, _) =
             scan_image_for_candidates(&binned_image10.as_ref().unwrap(),
-                                      binned_noise_estimate, sigma,
+                                      noise_estimate10, sigma,
                                       /*detect_hot_pixels=*/false,
                                       /*create_binned_image10=*/false,
                                       /*create_binned_image8=*/false);
-        for blob in form_blobs_from_candidates(candidates) {
+        for blob in form_blobs_from_candidates(candidates_from_binned) {
             match gate_star_2d(&blob, &binned_image10.as_ref().unwrap(),
                                /*full_res_image=*/image,
-                               binned_noise_estimate, sigma,
+                               noise_estimate10, sigma,
                                /*detect_hot_pixels=*/false,
                                max_size/2 + 1, max_size/2 + 1) {
                 Some(x) => stars.push(x),
@@ -1136,12 +1148,6 @@ pub fn get_stars_from_image(
             }
         }
     } else {
-        let (candidates, local_hot_pixel_count, _, _) =
-            scan_image_for_candidates(image, noise_estimate8, sigma,
-                                      /*detect_hot_pixels=*/true,
-                                      /*create_binned_image10=*/false,
-                                      /*create_binned_image8=*/false);
-        hot_pixel_count = local_hot_pixel_count;
         for blob in form_blobs_from_candidates(candidates) {
             match gate_star_2d(&blob, image,
                                /*full_res_image=*/image,
@@ -1157,7 +1163,7 @@ pub fn get_stars_from_image(
     // Sort by brightness estimate, brightest first.
     stars.sort_by(|a, b| b.brightness.partial_cmp(&a.brightness).unwrap());
 
-    (stars, hot_pixel_count, binned_image8)
+    (stars, hot_pixel_count, binned_image8, peak_star_pixel)
 }
 
 /// Summarizes an image region of interest. The pixel values used are not
@@ -1583,7 +1589,7 @@ mod tests {
             2,  4,  6,  8, 10, 12, 14, 16, 18, 20, 22, 24;
             0,  0,  0,  1,  0,  1,  1,  0,  1,  1,  1,  1;
             0,  0,  0,  0,  1,  0,  1,  1,  1,  1,  1,  3);
-        let (candidates, hot_pixel_count, binned_image10, _) =
+        let (candidates, hot_pixel_count, binned_image10, _, _) =
             scan_image_for_candidates(&image_12x4, 1.0, 8.0,
                                       /*detect_hot_pixels=*/true,
                                       /*create_binned_image10=*/true,
@@ -1603,7 +1609,7 @@ mod tests {
            10, 20, 30, 40, 50, 60, 70, 80, 90,100,110;
             2,  4,  6,250, 10, 12, 14, 16, 18, 20, 22;
             0,  0,  0,  1,  0,  1,  1,  0,  1,  1,  1);
-        let (candidates, hot_pixel_count, binned_image10, _) =
+        let (candidates, hot_pixel_count, binned_image10, _, _) =
             scan_image_for_candidates(&image_11x3, 1.0, 8.0,
                                       /*detect_hot_pixels=*/true,
                                       /*create_binned_image10=*/true,
@@ -1619,7 +1625,7 @@ mod tests {
 
         // Same, except with hot pixel detection turned off. Also request
         // 8 bit version of binned image.
-        let (candidates, hot_pixel_count, binned_image10, binned_image8) =
+        let (candidates, hot_pixel_count, binned_image10, binned_image8, _) =
             scan_image_for_candidates(&image_11x3, 1.0, 8.0,
                                       /*detect_hot_pixels=*/false,
                                       /*create_binned_image10=*/true,

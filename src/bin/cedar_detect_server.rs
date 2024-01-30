@@ -66,7 +66,7 @@ impl CedarDetect for MyCedarDetect {
         }
 
         let noise_estimate = estimate_noise_from_image(&req_image);
-        let (stars, hot_pixel_count, binned_image) = get_stars_from_image(
+        let (stars, hot_pixel_count, binned_image, peak_star_pixel) = get_stars_from_image(
             &req_image, noise_estimate, req.sigma, req.max_size as u32,
             req.use_binned_for_star_candidates, req.return_binned);
 
@@ -91,6 +91,7 @@ impl CedarDetect for MyCedarDetect {
         let response = cedar_detect::CentroidsResult{
             noise_estimate,
             hot_pixel_count: hot_pixel_count as i32,
+            peak_star_pixel: peak_star_pixel as i32,
             star_candidates: candidates,
             binned_image: if binned_image.is_some() {
                 let bimg: GrayImage = binned_image.unwrap();
