@@ -5,7 +5,7 @@ use std::time::Instant;
 use clap::Parser;
 use env_logger;
 use image::{GrayImage};
-use libc::{close, mmap, shm_open, c_char, O_RDONLY, PROT_READ, MAP_SHARED};
+use libc::{close, mmap, shm_open, O_RDONLY, PROT_READ, MAP_SHARED};
 use log::{info};
 
 use ::cedar_detect::algorithm::{estimate_noise_from_image, get_stars_from_image};
@@ -53,7 +53,7 @@ impl CedarDetect for MyCedarDetect {
                 // won't be any reallocations. Note that we call
                 // vec_shmem.leak() below, so the vector won't try to deallocate
                 // 'addr'.
-                let vec_shmem = Vec::<u8>::from_raw_parts(addr as *mut c_char,
+                let vec_shmem = Vec::<u8>::from_raw_parts(addr as *mut u8,
                                                           num_pixels, num_pixels);
                 req_image = GrayImage::from_raw(input_image.width as u32,
                                                 input_image.height as u32,
