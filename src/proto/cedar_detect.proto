@@ -101,5 +101,6 @@ message ImageCoord {
 }
 
 service CedarDetect {
+  // Returns INTERNAL error if the Image request's shared memory cannot be accessed.
   rpc ExtractCentroids(CentroidsRequest) returns (CentroidsResult);
 }

@@ -50,14 +50,23 @@ impl CedarDetect for MyCedarDetect {
             unsafe {
                 fd = shm_open(name.as_ptr(), O_RDONLY, 0);
                 if fd < 0 {
-                    panic!("Could not open shared memory at {:?}: errno {}",
-                           name, Error::last_os_error().raw_os_error().unwrap());
+                    let msg = format!(
+                        "Could not open shared memory at {:?}: errno {}",
+                        name, Error::last_os_error().raw_os_error().unwrap());
+                    warn!("{}", msg);
+                    // Clever client-side logic can recognize the INTERNAL error and
+                    // fall back to not using shared memory.
+                    return Err(tonic::Status::internal(msg))
+
                 }
                 addr = mmap(std::ptr::null_mut(), num_pixels, PROT_READ,
                             MAP_SHARED, fd, 0);
                 if addr == MAP_FAILED {
-                    panic!("Could not mmap shared memory at {:?} for {} bytes: errno {}",
-                           name, num_pixels, Error::last_os_error().raw_os_error().unwrap());
+                    let msg = format!(
+                        "Could not mmap shared memory at {:?} for {} bytes: errno {}",
+                        name, num_pixels, Error::last_os_error().raw_os_error().unwrap());
+                    warn!("{}", msg);
+                    return Err(tonic::Status::internal(msg))
                 }
                 // We are violating the invariant that 'addr' must have been
                 // allocated using the global allocator. This is OK because our
