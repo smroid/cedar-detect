@@ -57,7 +57,6 @@ impl CedarDetect for MyCedarDetect {
                     // Clever client-side logic can recognize the INTERNAL error and
                     // fall back to not using shared memory.
                     return Err(tonic::Status::internal(msg))
-
                 }
                 addr = mmap(std::ptr::null_mut(), num_pixels, PROT_READ,
                             MAP_SHARED, fd, 0);
