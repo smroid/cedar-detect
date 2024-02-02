@@ -371,7 +371,7 @@ where u16: From<P>
     let image_pixels: &Vec<P> = image.as_raw();
     let mut candidates = Vec::<CandidateFrom1D>::new();
     let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate + 0.5) as i16, 2);
-    let sigma_noise_3 = cmp::max((3.0 * sigma * noise_estimate + 0.5) as i16, 1);
+    let sigma_noise_3 = cmp::max((3.0 * sigma * noise_estimate + 0.5) as i16, 3);
 
     let (binned_width, binned_height) = (width / 2, height / 2);
     let mut binned_image10_data = Vec::<u16>::new();
@@ -1238,7 +1238,7 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
     let mut cleaned_image = image.clone();
 
     let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate) as i16, 2);
-    let sigma_noise_3 = cmp::max((3.0 * sigma * noise_estimate) as i16, 1);
+    let sigma_noise_3 = cmp::max((3.0 * sigma * noise_estimate) as i16, 3);
     for rownum in roi.top()..=roi.bottom() {
         // Get the slice of image_pixels corresponding to this row of the ROI.
         let row_start = (rownum * width as i32) as usize;
