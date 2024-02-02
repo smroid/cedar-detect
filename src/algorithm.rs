@@ -346,7 +346,8 @@ struct CandidateFrom1D {
 //   image is returned here.
 // Option<GrayImage>: if `create_binned_image8` is true, the 8 bit binned image
 //   is returned here.
-// P: the peak pixel value of the identified star candidates.
+// P: the peak pixel value of the identified star candidates. If there are no
+//   star candidates, this value has no meaning.
 //
 // P: u8 (original) or u16 (2x2 binned).
 fn scan_image_for_candidates<P: Primitive + std::fmt::Debug>(
@@ -1104,7 +1105,8 @@ fn stats_for_histogram(histogram: &[u32; 1024])
 /// Option<GrayImage>: if `return_binned_image` is true, the 2x2 binning of `image`
 ///   is returned.
 ///
-/// u8: the peak pixel value of the identified star candidates.
+/// u8: the peak pixel value of the identified star candidates. If there are no
+///   star candidates, this value has no meaning.
 pub fn get_stars_from_image(
     image: &GrayImage,
     noise_estimate: f32, sigma: f32, max_size: u32,
