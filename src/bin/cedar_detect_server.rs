@@ -65,6 +65,10 @@ impl CedarDetect for MyCedarDetect {
                         "Could not mmap shared memory at {:?} for {} bytes: errno {}",
                         name, num_pixels, Error::last_os_error().raw_os_error().unwrap());
                     warn!("{}", msg);
+                    if close(fd) == -1 {
+                        warn!("Could not close shared memory file: errno {}",
+                              Error::last_os_error().raw_os_error().unwrap());
+                    }
                     return Err(tonic::Status::internal(msg))
                 }
                 // We are violating the invariant that 'addr' must have been
