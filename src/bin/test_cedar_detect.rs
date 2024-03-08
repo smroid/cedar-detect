@@ -36,6 +36,10 @@ struct Args {
     #[arg(short, long, default_value_t = true)]
     binning: bool,
 
+    /// Whether hot pixels should be detected.
+    #[arg(short, long, default_value_t = true)]
+    hot_pixels: bool,
+
     /// Output list of star centroids.
     #[arg(short, long, default_value_t = false)]
     coords: bool,
@@ -90,7 +94,7 @@ fn process_file(file: &str, args: &Args) {
     let noise_estimate = estimate_noise_from_image(&img_u8);
     let (stars, _, _, _) = get_stars_from_image(
         &img_u8, noise_estimate, args.sigma, args.max_size, args.binning,
-        /*return_binned_image=*/false);
+        args.hot_pixels, /*return_binned_image=*/false);
     let elapsed = star_extraction_start.elapsed();
     info!("WxH: {}x{}; noise level {}", width, height, noise_estimate);
     info!("Star extraction found {} stars in {:?}", stars.len(), elapsed);

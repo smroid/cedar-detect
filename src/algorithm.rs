@@ -1093,6 +1093,9 @@ fn stats_for_histogram(histogram: &[u32; 1024])
 ///   removed) is used for star detection. Note that computing the centroids of
 ///   detected stars is always done in the full resolution `image`.
 ///
+///   `detect_hot_pixels` If true hot pixels are detected and not treated as
+///   stars. If false hot pixels might be reported as stars.
+///
 ///   `return_binned_image` If true, a 2x2 binning of `image` is returned. Note
 ///   that hot pixels are replaced during the binning process.
 ///
@@ -1111,6 +1114,7 @@ pub fn get_stars_from_image(
     image: &GrayImage,
     noise_estimate: f32, sigma: f32, max_size: u32,
     use_binned_image: bool,
+    detect_hot_pixels: bool,
     return_binned_image: bool)
     -> (Vec<StarDescription>, /*hot_pixel_count*/i32, Option<GrayImage>, /*peak_star_pixel*/u8) {
     // If noise estimate is below 0.5, assume that the image background has been
@@ -1120,8 +1124,7 @@ pub fn get_stars_from_image(
     let mut stars = Vec::<StarDescription>::new();
 
     let (candidates, hot_pixel_count, binned_image10, binned_image8, peak_star_pixel) =
-        scan_image_for_candidates(image, noise_estimate8, sigma,
-                                  /*detect_hot_pixels=*/true,
+        scan_image_for_candidates(image, noise_estimate8, sigma, detect_hot_pixels,
                                   /*create_binned_image10=*/use_binned_image,
                                   /*create_binned_image8=*/return_binned_image);
     if use_binned_image {
