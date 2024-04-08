@@ -89,9 +89,9 @@
 //! ## Centroid estimation
 //!
 //! CedarDetect's computes a sub-pixel centroid position for each detected star
-//! using the first moment of pixel intensity (center of gravity) calculated
-//! over a bounding box around the star. This suffices for many purposes, but a
-//! more exacting application might want to do its own centroiding:
+//! using quadratic interpolation of the peak and its neighbors. This suffices
+//! for many purposes, but a more exacting application might want to do its own
+//! centroiding:
 //!
 //! * If a higher bit-depth image was converted to 8 bit for calling
 //!   [get_stars_from_image()], centroiding in the original image may yield
@@ -783,8 +783,7 @@ where i32: From<P>
         perimeter_count += 1;
         if pixel_value < perimeter_min {
             perimeter_min = pixel_value;
-        }
-        if pixel_value > perimeter_max {
+        } else if pixel_value > perimeter_max {
             perimeter_max = pixel_value;
         }
     }
@@ -964,7 +963,7 @@ where usize: From<P>
     let noise_start = Instant::now();
     let (width, height) = image.dimensions();
     let box_size = cmp::min(30, cmp::min(width, height) / 4);
-    let mut stats_vec = Vec::<(f32, f32)>::new();
+    let mut stats_vec = Vec::<(f32, f32, f32)>::new();
     // Sample three areas across the horizontal midline of the image.
     stats_vec.push(stats_for_roi(image, &Rect::at(
         (width*1/4 - box_size/2) as i32, (height/2 - box_size/2) as i32)
@@ -976,18 +975,27 @@ where usize: From<P>
         (width*3/4 - box_size/2) as i32, (height/2 - box_size/2) as i32)
                                  .of_size(box_size, box_size)));
     // Pick the darkest box by median value.
-    stats_vec.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    let stddev = stats_vec[0].1;
+    stats_vec.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    let stddev = stats_vec[0].2;
     debug!("Noise estimate {} found in {:?}", stddev, noise_start.elapsed());
     stddev
 }
 
-// Returns (median, stddev) for the given image region. Excludes bright pixels
-// that are likely to be stars, as we're interested in the median/stddev of the
-// sky background.
+/// Estimates the background level of the given image region.
+pub fn estimate_background_from_image_region(image: &GrayImage, roi: &Rect)
+                                             -> f32 {
+    let (mean, _median, _stddev) = stats_for_roi(&image, &roi);
+    mean
+}
+
+// Returns (mean, median, stddev) for the given image region. Excludes bright
+// pixels that are likely to be stars, as we're interested in the
+// mean/median/stddev of the sky background.
 // P: u8 or u16.
 fn stats_for_roi<P: Primitive>(image: &ImageBuffer<Luma<P>, Vec<P>>,
-                               roi: &Rect) -> (/*median*/f32, /*stddev*/f32)
+                               roi: &Rect) -> (/*mean*/f32,
+                                               /*median*/f32,
+                                               /*stddev*/f32)
 where usize: From<P>,
 {
     // P is either 8 bits or 10 bits (2x2 binned values). Size histogram
@@ -1009,15 +1017,15 @@ where usize: From<P>,
     // Any pixel whose value is N * stddev above the median is deemed a star and
     // kicked out of the histogram.
     let star_cutoff = (trimmed_median as f32 +
-                       8.0 as f32 * f32::max(trimmed_stddev, 1.0)) as usize;
+                       8.0 * f32::max(trimmed_stddev, 1.0)) as usize;
     for h in 0_usize..1024 {
         if h >= star_cutoff {
             histogram[h] = 0;
         }
     }
     debug!("De-starred histogram: {:?}", histogram);
-    let (_mean, stddev, median) = stats_for_histogram(&histogram);
-    (median as f32, stddev)
+    let (mean, stddev, median) = stats_for_histogram(&histogram);
+    (mean, median as f32, stddev)
 }
 
 fn trim_histogram(histogram: &[u32; 1024], count_to_keep: u32)
@@ -1343,9 +1351,10 @@ mod tests {
     fn test_stats_for_roi() {
         let mut image_5x4 = GrayImage::new(5, 4);
         // Leave image as all zeros for now.
-        let (mut median, mut stddev) = stats_for_roi(
+        let (mut mean, mut median, mut stddev) = stats_for_roi(
             &image_5x4,
             &Rect::at(0, 0).of_size(5, 4));
+        assert_eq!(mean, 0_f32);
         assert_eq!(median, 0_f32);
         assert_eq!(stddev, 0_f32);
 
@@ -1355,26 +1364,29 @@ mod tests {
         image_5x4.put_pixel(3, 0, Luma::<u8>([1]));
         image_5x4.put_pixel(4, 0, Luma::<u8>([2]));
         image_5x4.put_pixel(0, 1, Luma::<u8>([1]));
-        (median, stddev) = stats_for_roi(
+        (mean, median, stddev) = stats_for_roi(
             &image_5x4,
             &Rect::at(0, 0).of_size(5, 4));
+        assert_eq!(mean, 0.35);
         assert_eq!(median, 0_f32);
         assert_abs_diff_eq!(stddev, 0.65, epsilon = 0.01);
 
         // Single bright pixel. This is removed because we eliminate the
         // brightest pixel(s).
         image_5x4.put_pixel(0, 0, Luma::<u8>([255]));
-        (median, stddev) = stats_for_roi(
+        (mean, median, stddev) = stats_for_roi(
             &image_5x4,
             &Rect::at(0, 0).of_size(5, 4));
+        assert_abs_diff_eq!(mean, 0.368, epsilon = 0.001);
         assert_eq!(median, 0_f32);
         assert_abs_diff_eq!(stddev, 0.66, epsilon = 0.01);
 
         // Add another non-zero pixel. This will be kept.
         image_5x4.put_pixel(0, 1, Luma::<u8>([4]));
-        (median, stddev) = stats_for_roi(
+        (mean, median, stddev) = stats_for_roi(
             &image_5x4,
             &Rect::at(0, 0).of_size(5, 4));
+        assert_abs_diff_eq!(mean, 0.526, epsilon = 0.001);
         assert_eq!(median, 0_f32);
         assert_abs_diff_eq!(stddev, 1.04, epsilon = 0.01);
     }

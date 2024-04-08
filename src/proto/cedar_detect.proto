@@ -46,11 +46,26 @@ message CentroidsRequest {
   // contribute to detected stars. If false, hot pixels could be falsely
   // detected as stars.
   bool detect_hot_pixels = 6;
+
+  // If provided, specifies a portion of `input_image` over which the background
+  // level (excluding stars) is estimated.
+  optional Rectangle estimate_background_region = 7;
+}
+
+// Describes a region within an Image.
+message Rectangle {
+  int32 origin_x = 1;
+  int32 origin_y = 2;
+  int32 width = 3;
+  int32 height = 4;
 }
 
 message CentroidsResult {
   // Estimated RMS noise level of the request's `input_image`.
   float noise_estimate = 1;
+
+  // Estimated background level of the request's `estimate_background_region`.
+  optional float background_estimate = 7;
 
   // The number of hot pixels seen. See algorithm implementation for more
   // information about hot pixels.

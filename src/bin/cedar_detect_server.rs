@@ -6,10 +6,13 @@ use std::time::Instant;
 use clap::Parser;
 use env_logger;
 use image::{GrayImage};
+use imageproc::rect::Rect;
 use libc::{c_void, close, mmap, munmap, shm_open, O_RDONLY, PROT_READ, MAP_FAILED, MAP_SHARED};
 use log::{debug, info, warn};
 
-use ::cedar_detect::algorithm::{estimate_noise_from_image, get_stars_from_image};
+use ::cedar_detect::algorithm::{estimate_noise_from_image,
+                                estimate_background_from_image_region,
+                                get_stars_from_image};
 use crate::cedar_detect::cedar_detect_server::{CedarDetect, CedarDetectServer};
 
 use tonic_web::GrpcWebLayer;
@@ -95,6 +98,27 @@ impl CedarDetect for MyCedarDetect {
             req.use_binned_for_star_candidates, req.detect_hot_pixels,
             req.return_binned);
 
+        let mut background_estimate: Option<f32> = None;
+        if let Some(estimate_background_region) = req.estimate_background_region {
+            if estimate_background_region.origin_x < 0 ||
+                estimate_background_region.origin_y < 0 ||
+                estimate_background_region.origin_x +
+                estimate_background_region.width > input_image.width ||
+                estimate_background_region.origin_y +
+                estimate_background_region.height > input_image.height
+            {
+                return Err(tonic::Status::invalid_argument(format!(
+                    "Invalid estimate_background_region {:?}",
+                    estimate_background_region)));
+            }
+            background_estimate = Some(estimate_background_from_image_region(
+                &req_image,
+                &Rect::at(estimate_background_region.origin_x,
+                          estimate_background_region.origin_y)
+                    .of_size(estimate_background_region.width as u32,
+                             estimate_background_region.height as u32)));
+        }
+
         if using_shmem {
             // Deconstruct req_image that is referencing shared memory.
             let vec_shmem = req_image.into_raw();
@@ -124,6 +148,7 @@ impl CedarDetect for MyCedarDetect {
         }
         let response = cedar_detect::CentroidsResult{
             noise_estimate,
+            background_estimate,
             hot_pixel_count: hot_pixel_count as i32,
             peak_star_pixel: peak_star_pixel as i32,
             star_candidates: candidates,

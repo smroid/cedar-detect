@@ -7,9 +7,12 @@ use env_logger;
 use image::io::Reader as ImageReader;
 use image::Rgb;
 use imageproc::drawing;
+use imageproc::rect::Rect;
 use log::{info, warn};
 
-use cedar_detect::algorithm::{estimate_noise_from_image, get_stars_from_image};
+use cedar_detect::algorithm::{estimate_noise_from_image,
+                              estimate_background_from_image_region,
+                              get_stars_from_image};
 
 /// Example program for running the CedarDetect star finding algorithm
 /// on test image(s).
@@ -37,7 +40,7 @@ struct Args {
     binning: bool,
 
     /// Whether hot pixels should be detected.
-    #[arg(short, long, default_value_t = true)]
+    #[arg(long, default_value_t = true)]
     hot_pixels: bool,
 
     /// Output list of star centroids.
@@ -92,11 +95,14 @@ fn process_file(file: &str, args: &Args) {
 
     let star_extraction_start = Instant::now();
     let noise_estimate = estimate_noise_from_image(&img_u8);
+    let background_estimate = estimate_background_from_image_region(
+        &img_u8, &Rect::at(0, 0).of_size(100, 100));
     let (stars, _, _, _) = get_stars_from_image(
         &img_u8, noise_estimate, args.sigma, args.max_size, args.binning,
         args.hot_pixels, /*return_binned_image=*/false);
     let elapsed = star_extraction_start.elapsed();
-    info!("WxH: {}x{}; noise level {}", width, height, noise_estimate);
+    info!("WxH: {}x{}; noise level {} background {}",
+          width, height, noise_estimate, background_estimate);
     info!("Star extraction found {} stars in {:?}", stars.len(), elapsed);
     info!("{}ms per megapixel\n",
           elapsed.as_secs_f32() * 1000.0 / ((width * height) as f32 / 1000000.0));
