@@ -346,8 +346,6 @@ struct CandidateFrom1D {
 //   image is returned here.
 // Option<GrayImage>: if `create_binned_image8` is true, the 8 bit binned image
 //   is returned here.
-// P: the peak pixel value of the identified star candidates. If there are no
-//   star candidates, this value has no meaning.
 //
 // P: u8 (original) or u16 (2x2 binned).
 fn scan_image_for_candidates<P: Primitive + std::fmt::Debug>(
@@ -359,13 +357,11 @@ fn scan_image_for_candidates<P: Primitive + std::fmt::Debug>(
     -> (Vec<CandidateFrom1D>,
         /*hot_pixel_count*/i32,
         Option<Gray16Image>,
-        Option<GrayImage>,
-        /*peak_star_pixel*/P)
+        Option<GrayImage>)
 where u16: From<P>
 {
     let row_scan_start = Instant::now();
     let mut hot_pixel_count = 0;
-    let mut peak_star_pixel = P::from(0).unwrap();
     let width = image.dimensions().0 as usize;
     let height = image.dimensions().1 as usize;
     let image_pixels: &Vec<P> = image.as_raw();
@@ -420,9 +416,6 @@ where u16: From<P>
                     ResultType::Candidate => {
                         candidates.push(CandidateFrom1D{x: center_x as i32,
                                                         y: rownum as i32});
-                        if pixel_value > peak_star_pixel {
-                            peak_star_pixel = pixel_value;
-                        }
                     },
                     ResultType::HotPixel => { hot_pixel_count += 1; },
                 }
@@ -452,16 +445,13 @@ where u16: From<P>
             // Slide a 7 pixel gate across the row.
             for gate in row_pixels.windows(7) {
                 center_x += 1;
-                let (pixel_value, result_type) = gate_star_1d(
+                let (_pixel_value, result_type) = gate_star_1d(
                     gate, sigma_noise_2, sigma_noise_3, detect_hot_pixels);
                 match result_type {
                     ResultType::Uninteresting => (),
                     ResultType::Candidate => {
                         candidates.push(CandidateFrom1D{x: center_x as i32,
                                                         y: rownum as i32});
-                        if pixel_value > peak_star_pixel {
-                            peak_star_pixel = pixel_value;
-                        }
                     },
                     ResultType::HotPixel => { hot_pixel_count += 1; },
                 }
@@ -482,7 +472,7 @@ where u16: From<P>
             binned_width as u32, binned_height as u32,
             binned_image8_data).unwrap());
     }
-    (candidates, hot_pixel_count, binned10_result, binned8_result, peak_star_pixel)
+    (candidates, hot_pixel_count, binned10_result, binned8_result)
 }
 
 #[derive(Debug)]
@@ -589,6 +579,10 @@ pub struct StarDescription {
     /// to the center of the image's upper left pixel.
     pub centroid_x: f32,
     pub centroid_y: f32,
+
+    /// Value of the brightest pixel in this star's region. Not background
+    /// subtracted.
+    pub peak_value: u8,
 
     /// Sum of the u8 pixel values of the star's region. The estimated
     /// background is subtracted.
@@ -834,6 +828,7 @@ where i32: From<P>
     let num_saturated;
     let x;
     let y;
+    let peak_value;
     if image_width < full_res_image.dimensions().0 {
         // The `image` is binned. Compute moments using the full-res image.
         // Translate the margin (in the binned image) to the full-res image.
@@ -847,23 +842,25 @@ where i32: From<P>
                                   full_res_image.height()) - top;
         let full_res_margin =
             Rect::at(left as i32, top as i32).of_size(adj_width, adj_height);
-        (brightness, num_saturated) = compute_brightness(full_res_image, &full_res_margin);
+        (brightness, num_saturated, peak_value) =
+            compute_brightness(full_res_image, &full_res_margin);
         (x, y) = compute_peak_coord(full_res_image, &full_res_margin);
     } else {
-        (brightness, num_saturated) = compute_brightness(full_res_image, &margin);
+        (brightness, num_saturated, peak_value) =
+            compute_brightness(full_res_image, &margin);
         (x, y) = compute_peak_coord(full_res_image, &margin);
     }
     Some(StarDescription{centroid_x: x + 0.5,
                          centroid_y: y + 0.5,
-                         brightness, num_saturated})
+                         peak_value, brightness, num_saturated})
 }
 
 // Computes the background-subtracted brightness of the 2d image region.
 // The outer perimeter of the bounding box is used for background
 // estimation; the inner pixels of the bounding box are background
 // subtracted and summed to form the brightness value.
-// Returns: (summed pixel values, count of saturated pixels)
-fn compute_brightness(image: &GrayImage, bounding_box: &Rect) -> (f32, u16) {
+// Returns: (summed pixel values, count of saturated pixels, peak pixel value)
+fn compute_brightness(image: &GrayImage, bounding_box: &Rect) -> (f32, u16, u8) {
     let mut boundary_sum: i32 = 0;
     let mut boundary_count: i32 = 0;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
@@ -878,14 +875,18 @@ fn compute_brightness(image: &GrayImage, bounding_box: &Rect) -> (f32, u16) {
 
     let mut num_saturated = 0;
     let mut sum = 0.0;
+    let mut peak_value: u8 = 0;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
         &image, &inset, /*include_interior=*/true) {
         if pixel_value == 255_u8 {
             num_saturated += 1;
         }
+        if pixel_value > peak_value {
+            peak_value = pixel_value;
+        }
         sum += pixel_value as f32 - background_est;
     }
-    (f32::max(sum, 0.0), num_saturated)
+    (f32::max(sum, 0.0), num_saturated, peak_value)
 }
 
 // Computes the position of the peak, with sub-pixel interpolation.
@@ -1115,23 +1116,20 @@ fn stats_for_histogram(histogram: &[u32; 1024])
 ///
 /// Option<GrayImage>: if `return_binned_image` is true, the 2x2 binning of `image`
 ///   is returned.
-///
-/// u8: the peak pixel value of the identified star candidates. If there are no
-///   star candidates, this value has no meaning.
 pub fn get_stars_from_image(
     image: &GrayImage,
     noise_estimate: f32, sigma: f32, max_size: u32,
     use_binned_image: bool,
     detect_hot_pixels: bool,
     return_binned_image: bool)
-    -> (Vec<StarDescription>, /*hot_pixel_count*/i32, Option<GrayImage>, /*peak_star_pixel*/u8) {
+    -> (Vec<StarDescription>, /*hot_pixel_count*/i32, Option<GrayImage>) {
     // If noise estimate is below 0.5, assume that the image background has been
     // crushed to black; use a minimum noise value.
     let noise_estimate8 = f32::max(noise_estimate, 0.5);
 
     let mut stars = Vec::<StarDescription>::new();
 
-    let (candidates, hot_pixel_count, binned_image10, binned_image8, peak_star_pixel) =
+    let (candidates, hot_pixel_count, binned_image10, binned_image8) =
         scan_image_for_candidates(image, noise_estimate8, sigma, detect_hot_pixels,
                                   /*create_binned_image10=*/use_binned_image,
                                   /*create_binned_image8=*/return_binned_image);
@@ -1144,7 +1142,7 @@ pub fn get_stars_from_image(
         // by 2x. We thus use twice the noise floor of the noise_estimate_8.
         let noise_estimate10 = f32::max(noise_estimate10, 1.0);
 
-        let (candidates_from_binned, _, _, _, _) =
+        let (candidates_from_binned, _, _, _) =
             scan_image_for_candidates(&binned_image10.as_ref().unwrap(),
                                       noise_estimate10, sigma,
                                       /*detect_hot_pixels=*/false,
@@ -1176,7 +1174,7 @@ pub fn get_stars_from_image(
     // Sort by brightness estimate, brightest first.
     stars.sort_by(|a, b| b.brightness.partial_cmp(&a.brightness).unwrap());
 
-    (stars, hot_pixel_count, binned_image8, peak_star_pixel)
+    (stars, hot_pixel_count, binned_image8)
 }
 
 /// Summarizes an image region of interest. The pixel values used are not
@@ -1606,7 +1604,7 @@ mod tests {
             2,  4,  6,  8, 10, 12, 14, 16, 18, 20, 22, 24;
             0,  0,  0,  1,  0,  1,  1,  0,  1,  1,  1,  1;
             0,  0,  0,  0,  1,  0,  1,  1,  1,  1,  1,  3);
-        let (candidates, hot_pixel_count, binned_image10, _, _) =
+        let (candidates, hot_pixel_count, binned_image10, _) =
             scan_image_for_candidates(&image_12x4, 1.0, 8.0,
                                       /*detect_hot_pixels=*/true,
                                       /*create_binned_image10=*/true,
@@ -1626,7 +1624,7 @@ mod tests {
            10, 20, 30, 40, 50, 60, 70, 80, 90,100,110;
             2,  4,  6,250, 10, 12, 14, 16, 18, 20, 22;
             0,  0,  0,  1,  0,  1,  1,  0,  1,  1,  1);
-        let (candidates, hot_pixel_count, binned_image10, _, _) =
+        let (candidates, hot_pixel_count, binned_image10, _) =
             scan_image_for_candidates(&image_11x3, 1.0, 8.0,
                                       /*detect_hot_pixels=*/true,
                                       /*create_binned_image10=*/true,
@@ -1642,7 +1640,7 @@ mod tests {
 
         // Same, except with hot pixel detection turned off. Also request
         // 8 bit version of binned image.
-        let (candidates, hot_pixel_count, binned_image10, binned_image8, _) =
+        let (candidates, hot_pixel_count, binned_image10, binned_image8) =
             scan_image_for_candidates(&image_11x3, 1.0, 8.0,
                                       /*detect_hot_pixels=*/false,
                                       /*create_binned_image10=*/true,
@@ -1668,7 +1666,7 @@ mod tests {
         let mut candidates = Vec::<CandidateFrom1D>::new();
         // Candidates on the same row are not combined, even if they are close
         // together. This is because, in practice due to the operation of
-        // gate_star_1d(), candiates in the same row will always be well
+        // gate_star_1d(), candidates in the same row will always be well
         // separated.
         candidates.push(CandidateFrom1D{x: 20, y:3});
         candidates.push(CandidateFrom1D{x: 23, y:3});
@@ -2040,10 +2038,11 @@ mod tests {
         9, 10, 10,  10, 10, 10,  9;
         9,  9,  9,   9,  9,  9,  9);
         let neighbors = Rect::at(1, 1).of_size(5, 5);
-        let (brightness, num_sat) = compute_brightness(&image_7x7, &neighbors);
+        let (brightness, num_sat, peak_value) = compute_brightness(&image_7x7, &neighbors);
         assert_abs_diff_eq!(brightness,
                             528.0, epsilon = 0.1);
         assert_eq!(num_sat, 2);
+        assert_eq!(peak_value, 255);
     }
 
     #[test]

@@ -71,7 +71,8 @@ message CentroidsResult {
   // information about hot pixels.
   int32 hot_pixel_count = 2;
 
-  // The peak pixel value of the identified star candidates.
+  // The peak pixel value of the identified star candidates. This might be an average
+  // of the N brightest star candidates.
   int32 peak_star_pixel = 6;
 
   // The star candidates detected by CedarDetect; ordered by highest

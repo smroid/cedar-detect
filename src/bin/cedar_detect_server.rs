@@ -93,7 +93,7 @@ impl CedarDetect for MyCedarDetect {
         }
 
         let noise_estimate = estimate_noise_from_image(&req_image);
-        let (stars, hot_pixel_count, binned_image, peak_star_pixel) = get_stars_from_image(
+        let (stars, hot_pixel_count, binned_image) = get_stars_from_image(
             &req_image, noise_estimate, req.sigma, req.max_size as u32,
             req.use_binned_for_star_candidates, req.detect_hot_pixels,
             req.return_binned);
@@ -135,8 +135,17 @@ impl CedarDetect for MyCedarDetect {
             }
         }
 
+        // Average the peak pixels of the N brightest stars.
+        let mut sum_peak: i32 = 0;
+        let mut num_peak = 0;
+        const NUM_PEAKS: i32 = 10;
+
         let mut candidates = Vec::<cedar_detect::StarCentroid>::new();
         for star in stars {
+            if num_peak < NUM_PEAKS {
+                sum_peak += star.peak_value as i32;
+                num_peak += 1;
+            }
             candidates.push(cedar_detect::StarCentroid{
                 centroid_position: Some(cedar_detect::ImageCoord{
                     x: star.centroid_x,
@@ -150,7 +159,7 @@ impl CedarDetect for MyCedarDetect {
             noise_estimate,
             background_estimate,
             hot_pixel_count: hot_pixel_count as i32,
-            peak_star_pixel: peak_star_pixel as i32,
+            peak_star_pixel: if num_peak > 0 { sum_peak / num_peak } else { 255 },
             star_candidates: candidates,
             binned_image: if binned_image.is_some() {
                 let bimg: GrayImage = binned_image.unwrap();
