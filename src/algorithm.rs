@@ -120,6 +120,9 @@ use image::{GrayImage, ImageBuffer, Luma, Primitive};
 use imageproc::rect::Rect;
 use log::{debug};
 
+use crate::histogram_funcs::{HistogramStats,
+                             remove_stars_from_histogram, stats_for_histogram};
+
 // When get_stars_from_image() is called with the 'use_binned_image' option,
 // an intermediate 2x2 binned image is formed by summing pixel values. This
 // results in up to 10 bit pixel values, so we use a u16 ImageBuffer when
@@ -346,25 +349,27 @@ struct CandidateFrom1D {
 //   image is returned here.
 // Option<GrayImage>: if `create_binned_image8` is true, the 8 bit binned image
 //   is returned here.
-//
-// P: u8 (original) or u16 (2x2 binned).
-fn scan_image_for_candidates<P: Primitive + std::fmt::Debug>(
-    image: &ImageBuffer<Luma<P>, Vec<P>>,
-    noise_estimate: f32, sigma: f32,
-    detect_hot_pixels: bool,
-    create_binned_image10: bool,
-    create_binned_image8: bool)
-    -> (Vec<CandidateFrom1D>,
-        /*hot_pixel_count*/i32,
-        Option<Gray16Image>,
-        Option<GrayImage>)
-where u16: From<P>
-{
+// [u32; 256]: histogram of the `image` pixel values, with hot pixels replaced.
+//   Excludes the few leftmost and rightmost columns.
+//   If `create_binned_image8`, the histogram is over that image rather than the
+//   input `image`.
+fn scan_image_for_candidates(image: &GrayImage,
+                             noise_estimate: f32, sigma: f32,
+                             detect_hot_pixels: bool,
+                             create_binned_image10: bool,
+                             create_binned_image8: bool)
+                             -> (Vec<CandidateFrom1D>,
+                                 /*hot_pixel_count*/i32,
+                                 Option<Gray16Image>,
+                                 Option<GrayImage>,
+                                 [u32; 256]) {
+    let mut histogram: [u32; 256] = [0; 256];
+
     let row_scan_start = Instant::now();
     let mut hot_pixel_count = 0;
     let width = image.dimensions().0 as usize;
     let height = image.dimensions().1 as usize;
-    let image_pixels: &Vec<P> = image.as_raw();
+    let image_pixels: &Vec<u8> = image.as_raw();
     let mut candidates = Vec::<CandidateFrom1D>::new();
     let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate + 0.5) as i16, 2);
     let sigma_noise_3 = cmp::max((3.0 * sigma * noise_estimate + 0.5) as i16, 3);
@@ -384,43 +389,54 @@ where u16: From<P>
     }
 
     for rownum in 0..height {
+        if (create_binned_image10 || create_binned_image8) &&
+            rownum == height-1 && height & 1 != 0
+        {
+            break;  // Skip final row on odd-height image when binning.
+        }
         // Get the slice of image_pixels corresponding to this row.
-        let row_pixels: &[P] = &image_pixels.as_slice()
+        let row_pixels: &[u8] = &image_pixels.as_slice()
             [rownum * width .. (rownum+1) * width];
         let mut center_x = 2_usize;
-        // We duplicate the loops, slightly different according to whether we
-        // are binning. We do this to avoid having a conditional on binning
-        // in the inner loop.
+        let binned_rownum = rownum / 2;
+        // Set up accumulator row for binning.
+        let binned_slice: &mut[u16] = if create_binned_image10 || create_binned_image8 {
+            &mut binned_image10_data.as_mut_slice()
+                [binned_rownum * binned_width .. (binned_rownum+1) * binned_width]
+        } else {
+            // Will not be accessed.
+            &mut binned_image10_data.as_mut_slice()[0..0]
+        };
         if create_binned_image10 || create_binned_image8 {
-            if rownum == height-1 && height & 1 != 0 {
-                break;  // Skip final row on odd-height image when binning.
-            }
-            let binned_rownum = rownum / 2;
-            // Set up accumulator row for binning.
-            let binned_slice: &mut[u16] = &mut binned_image10_data.as_mut_slice()
-                [binned_rownum * binned_width .. (binned_rownum+1) * binned_width];
             if rownum & 1 == 0 {
                 binned_slice.fill(0);
             }
             binned_slice[0] += u16::from(row_pixels[0]);
             binned_slice[0] += u16::from(row_pixels[1]);
             binned_slice[1] += u16::from(row_pixels[2]);
-            // Slide a 7 pixel gate across the row.
-            for gate in row_pixels.windows(7) {
-                center_x += 1;
-                let (pixel_value, result_type) = gate_star_1d(
-                    gate, sigma_noise_2, sigma_noise_3, detect_hot_pixels);
-                binned_slice[center_x / 2] += u16::from(pixel_value);
-                match result_type {
-                    ResultType::Uninteresting => (),
-                    ResultType::Candidate => {
-                        candidates.push(CandidateFrom1D{x: center_x as i32,
-                                                        y: rownum as i32});
-                    },
-                    ResultType::HotPixel => { hot_pixel_count += 1; },
-                }
-            }
+        }
+        // Slide a 7 pixel gate across the row.
+        for gate in row_pixels.windows(7) {
             center_x += 1;
+            let (pixel_value, result_type) = gate_star_1d(
+                gate, sigma_noise_2, sigma_noise_3, detect_hot_pixels);
+            if !create_binned_image8 {
+                histogram[pixel_value as usize] += 1;
+            }
+            if create_binned_image10 || create_binned_image8 {
+                binned_slice[center_x / 2] += u16::from(pixel_value);
+            }
+            match result_type {
+                ResultType::Uninteresting => (),
+                ResultType::Candidate => {
+                    candidates.push(CandidateFrom1D{x: center_x as i32,
+                                                    y: rownum as i32});
+                },
+                ResultType::HotPixel => { hot_pixel_count += 1; },
+            }
+        }
+        center_x += 1;
+        if create_binned_image10 || create_binned_image8 {
             while center_x < width - 1 {
                 binned_slice[center_x / 2] += u16::from(row_pixels[center_x]);
                 center_x += 1;
@@ -437,23 +453,10 @@ where u16: From<P>
                     let binned_image8_row: &mut[u8] = &mut binned_image8_data.as_mut_slice()
                         [binned_rownum * binned_width .. (binned_rownum+1) * binned_width];
                     for x in 0..binned_width {
-                        binned_image8_row[x] = (binned_image10_row[x] / 4) as u8;
+                        let binned_pixel = (binned_image10_row[x] / 4) as u8;
+                        histogram[binned_pixel as usize] += 1;
+                        binned_image8_row[x] = binned_pixel;
                     }
-                }
-            }
-        } else {
-            // Slide a 7 pixel gate across the row.
-            for gate in row_pixels.windows(7) {
-                center_x += 1;
-                let (_pixel_value, result_type) = gate_star_1d(
-                    gate, sigma_noise_2, sigma_noise_3, detect_hot_pixels);
-                match result_type {
-                    ResultType::Uninteresting => (),
-                    ResultType::Candidate => {
-                        candidates.push(CandidateFrom1D{x: center_x as i32,
-                                                        y: rownum as i32});
-                    },
-                    ResultType::HotPixel => { hot_pixel_count += 1; },
                 }
             }
         }
@@ -472,8 +475,42 @@ where u16: From<P>
             binned_width as u32, binned_height as u32,
             binned_image8_data).unwrap());
     }
-    (candidates, hot_pixel_count, binned10_result, binned8_result)
+    (candidates, hot_pixel_count, binned10_result, binned8_result, histogram)
 }
+
+// `image` Image to be scanned. This is a 10-bit binned image.
+fn scan_binned_image_for_candidates(
+    image: &Gray16Image, noise_estimate: f32, sigma: f32)
+    -> Vec<CandidateFrom1D>
+{
+    let row_scan_start = Instant::now();
+    let width = image.dimensions().0 as usize;
+    let height = image.dimensions().1 as usize;
+    let image_pixels: &Vec<u16> = image.as_raw();
+    let mut candidates = Vec::<CandidateFrom1D>::new();
+    let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate + 0.5) as i16, 2);
+    let sigma_noise_3 = cmp::max((3.0 * sigma * noise_estimate + 0.5) as i16, 3);
+
+    for rownum in 0..height {
+        // Get the slice of image_pixels corresponding to this row.
+        let row_pixels: &[u16] = &image_pixels.as_slice()
+            [rownum * width .. (rownum+1) * width];
+        let mut center_x = 2_usize;
+        // Slide a 7 pixel gate across the row.
+        for gate in row_pixels.windows(7) {
+            center_x += 1;
+            let (_pixel_value, result_type) = gate_star_1d(
+                gate, sigma_noise_2, sigma_noise_3, /*detect_hot_pixels=*/false);
+            if result_type == ResultType::Candidate {
+                candidates.push(CandidateFrom1D{x: center_x as i32, y: rownum as i32});
+            }
+        }
+    }
+    debug!("Binned image scan found {} candidates in {:?}",
+          candidates.len(), row_scan_start.elapsed());
+    candidates
+}
+
 
 #[derive(Debug)]
 struct Blob {
@@ -964,7 +1001,7 @@ where usize: From<P>
     let noise_start = Instant::now();
     let (width, height) = image.dimensions();
     let box_size = cmp::min(30, cmp::min(width, height) / 4);
-    let mut stats_vec = Vec::<(f32, f32, f32)>::new();
+    let mut stats_vec = Vec::<HistogramStats>::new();
     // Sample three areas across the horizontal midline of the image.
     stats_vec.push(stats_for_roi(image, &Rect::at(
         (width*1/4 - box_size/2) as i32, (height/2 - box_size/2) as i32)
@@ -975,9 +1012,9 @@ where usize: From<P>
     stats_vec.push(stats_for_roi(image, &Rect::at(
         (width*3/4 - box_size/2) as i32, (height/2 - box_size/2) as i32)
                                  .of_size(box_size, box_size)));
-    // Pick the darkest box by median value.
-    stats_vec.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-    let stddev = stats_vec[0].2;
+    // Pick the darkest box by mean value.
+    stats_vec.sort_by(|a, b| a.mean.partial_cmp(&b.mean).unwrap());
+    let stddev = stats_vec[0].stddev;
     debug!("Noise estimate {} found in {:?}", stddev, noise_start.elapsed());
     stddev
 }
@@ -985,93 +1022,27 @@ where usize: From<P>
 /// Estimates the background level of the given image region.
 pub fn estimate_background_from_image_region(image: &GrayImage, roi: &Rect)
                                              -> f32 {
-    let (mean, _median, _stddev) = stats_for_roi(&image, &roi);
-    mean
+    let stats = stats_for_roi(&image, &roi);
+    stats.mean
 }
 
-// Returns (mean, median, stddev) for the given image region. Excludes bright
-// pixels that are likely to be stars, as we're interested in the
-// mean/median/stddev of the sky background.
+// Returns mean/median/stddev for the given image region. Excludes bright
+// pixels that are likely to be stars, as we're interested in the statistics
+// of the sky background.
 // P: u8 or u16.
 fn stats_for_roi<P: Primitive>(image: &ImageBuffer<Luma<P>, Vec<P>>,
-                               roi: &Rect) -> (/*mean*/f32,
-                                               /*median*/f32,
-                                               /*stddev*/f32)
+                               roi: &Rect) -> HistogramStats
 where usize: From<P>,
 {
     // P is either 8 bits or 10 bits (2x2 binned values). Size histogram
     // accordingly.
     let mut histogram: [u32; 1024] = [0; 1024];
-    let mut pixel_count = 0;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
         &image, &roi, /*include_interior=*/true) {
         histogram[usize::from(pixel_value)] += 1;
-        pixel_count += 1;
     }
-    // Do a sloppy trim of the brightest pixels; this will give us a de-starred
-    // median and stddev that we can use for a more precise trim.
-    let trimmed_histogram = trim_histogram(&histogram, pixel_count * 9 / 10);
-    let (_trimmed_mean, trimmed_stddev, trimmed_median) =
-        stats_for_histogram(&trimmed_histogram);
-    debug!("Original histogram: {:?}; median {}; stddev {}",
-           histogram, trimmed_median, trimmed_stddev);
-    // Any pixel whose value is N * stddev above the median is deemed a star and
-    // kicked out of the histogram.
-    let star_cutoff = (trimmed_median as f32 +
-                       8.0 * f32::max(trimmed_stddev, 1.0)) as usize;
-    for h in 0_usize..1024 {
-        if h >= star_cutoff {
-            histogram[h] = 0;
-        }
-    }
-    debug!("De-starred histogram: {:?}", histogram);
-    let (mean, stddev, median) = stats_for_histogram(&histogram);
-    (mean, median as f32, stddev)
-}
-
-fn trim_histogram(histogram: &[u32; 1024], count_to_keep: u32)
-                  -> [u32; 1024] {
-    let mut trimmed_histogram = *histogram;
-    let mut count = 0;
-    for h in 0..1024 {
-        let bin_count = trimmed_histogram[h];
-        if count + bin_count > count_to_keep {
-            let excess = count + bin_count - count_to_keep;
-            trimmed_histogram[h] -= excess;
-        }
-        count += trimmed_histogram[h];
-    }
-    return trimmed_histogram;
-}
-
-fn stats_for_histogram(histogram: &[u32; 1024])
-                       -> (/*mean*/f32, /*stddev*/f32, /*median*/usize) {
-    let mut count = 0;
-    let mut first_moment = 0;
-    for h in 0..1024 {
-        let bin_count = histogram[h];
-        count += bin_count;
-        first_moment += bin_count * h as u32;
-    }
-    if count == 0 {
-        return (0.0, 0.0, 0);
-    }
-    let mean = first_moment as f32 / count as f32;
-    let mut second_moment: f32 = 0.0;
-    let mut sub_count = 0;
-    let mut median = 0;
-    for h in 0..1024 {
-        let bin_count = histogram[h];
-        second_moment += bin_count as f32 * (h as f32 - mean) * (h as f32 - mean);
-        if sub_count < count / 2 {
-            sub_count += bin_count;
-            if sub_count >= count / 2 {
-                median = h;
-            }
-        }
-    }
-    let stddev = (second_moment / count as f32).sqrt();
-    (mean, stddev, median)
+    remove_stars_from_histogram(&mut histogram, /*sigma=*/8.0);
+    stats_for_histogram(&histogram)
 }
 
 /// This function runs the CedarDetect algorithm on the supplied `image`, returning
@@ -1116,20 +1087,29 @@ fn stats_for_histogram(histogram: &[u32; 1024])
 ///
 /// Option<GrayImage>: if `return_binned_image` is true, the 2x2 binning of `image`
 ///   is returned.
-pub fn get_stars_from_image(
-    image: &GrayImage,
-    noise_estimate: f32, sigma: f32, max_size: u32,
-    use_binned_image: bool,
-    detect_hot_pixels: bool,
-    return_binned_image: bool)
-    -> (Vec<StarDescription>, /*hot_pixel_count*/i32, Option<GrayImage>) {
+///
+/// [u32; 256]: histogram of the `image` pixel values, with hot pixels replaced.
+///   Excludes the few leftmost and rightmost columns.
+///   If `return_binned_image`, the histogram is over that image rather than the
+///   input `image`.
+pub fn get_stars_from_image(image: &GrayImage,
+                            noise_estimate: f32,
+                            sigma: f32,
+                            max_size: u32,
+                            use_binned_image: bool,
+                            detect_hot_pixels: bool,
+                            return_binned_image: bool)
+                            -> (Vec<StarDescription>,
+                                /*hot_pixel_count*/i32,
+                                Option<GrayImage>,
+                                [u32; 256]) {
     // If noise estimate is below 0.5, assume that the image background has been
     // crushed to black; use a minimum noise value.
     let noise_estimate8 = f32::max(noise_estimate, 0.5);
 
     let mut stars = Vec::<StarDescription>::new();
 
-    let (candidates, hot_pixel_count, binned_image10, binned_image8) =
+    let (candidates, hot_pixel_count, binned_image10, binned_image8, histogram) =
         scan_image_for_candidates(image, noise_estimate8, sigma, detect_hot_pixels,
                                   /*create_binned_image10=*/use_binned_image,
                                   /*create_binned_image8=*/return_binned_image);
@@ -1142,12 +1122,9 @@ pub fn get_stars_from_image(
         // by 2x. We thus use twice the noise floor of the noise_estimate_8.
         let noise_estimate10 = f32::max(noise_estimate10, 1.0);
 
-        let (candidates_from_binned, _, _, _) =
-            scan_image_for_candidates(&binned_image10.as_ref().unwrap(),
-                                      noise_estimate10, sigma,
-                                      /*detect_hot_pixels=*/false,
-                                      /*create_binned_image10=*/false,
-                                      /*create_binned_image8=*/false);
+        let candidates_from_binned =
+            scan_binned_image_for_candidates(&binned_image10.as_ref().unwrap(),
+                                             noise_estimate10, sigma);
         for blob in form_blobs_from_candidates(candidates_from_binned) {
             match gate_star_2d(&blob, &binned_image10.as_ref().unwrap(),
                                /*full_res_image=*/image,
@@ -1174,7 +1151,7 @@ pub fn get_stars_from_image(
     // Sort by brightness estimate, brightest first.
     stars.sort_by(|a, b| b.brightness.partial_cmp(&a.brightness).unwrap());
 
-    (stars, hot_pixel_count, binned_image8)
+    (stars, hot_pixel_count, binned_image8, histogram)
 }
 
 /// Summarizes an image region of interest. The pixel values used are not
@@ -1349,12 +1326,11 @@ mod tests {
     fn test_stats_for_roi() {
         let mut image_5x4 = GrayImage::new(5, 4);
         // Leave image as all zeros for now.
-        let (mut mean, mut median, mut stddev) = stats_for_roi(
-            &image_5x4,
-            &Rect::at(0, 0).of_size(5, 4));
-        assert_eq!(mean, 0_f32);
-        assert_eq!(median, 0_f32);
-        assert_eq!(stddev, 0_f32);
+        let mut stats = stats_for_roi(&image_5x4,
+                                      &Rect::at(0, 0).of_size(5, 4));
+        assert_eq!(stats.mean, 0_f32);
+        assert_eq!(stats.median, 0);
+        assert_eq!(stats.stddev, 0_f32);
 
         // Add some noise.
         image_5x4.put_pixel(1, 0, Luma::<u8>([1]));
@@ -1362,42 +1338,28 @@ mod tests {
         image_5x4.put_pixel(3, 0, Luma::<u8>([1]));
         image_5x4.put_pixel(4, 0, Luma::<u8>([2]));
         image_5x4.put_pixel(0, 1, Luma::<u8>([1]));
-        (mean, median, stddev) = stats_for_roi(
-            &image_5x4,
-            &Rect::at(0, 0).of_size(5, 4));
-        assert_eq!(mean, 0.35);
-        assert_eq!(median, 0_f32);
-        assert_abs_diff_eq!(stddev, 0.65, epsilon = 0.01);
+        stats = stats_for_roi(&image_5x4,
+                              &Rect::at(0, 0).of_size(5, 4));
+        assert_eq!(stats.mean, 0.35);
+        assert_eq!(stats.median, 0);
+        assert_abs_diff_eq!(stats.stddev, 0.65, epsilon = 0.01);
 
         // Single bright pixel. This is removed because we eliminate the
         // brightest pixel(s).
         image_5x4.put_pixel(0, 0, Luma::<u8>([255]));
-        (mean, median, stddev) = stats_for_roi(
-            &image_5x4,
-            &Rect::at(0, 0).of_size(5, 4));
-        assert_abs_diff_eq!(mean, 0.368, epsilon = 0.001);
-        assert_eq!(median, 0_f32);
-        assert_abs_diff_eq!(stddev, 0.66, epsilon = 0.01);
+        stats = stats_for_roi(&image_5x4,
+                              &Rect::at(0, 0).of_size(5, 4));
+        assert_abs_diff_eq!(stats.mean, 0.368, epsilon = 0.001);
+        assert_eq!(stats.median, 0);
+        assert_abs_diff_eq!(stats.stddev, 0.66, epsilon = 0.01);
 
         // Add another non-zero pixel. This will be kept.
         image_5x4.put_pixel(0, 1, Luma::<u8>([4]));
-        (mean, median, stddev) = stats_for_roi(
-            &image_5x4,
-            &Rect::at(0, 0).of_size(5, 4));
-        assert_abs_diff_eq!(mean, 0.526, epsilon = 0.001);
-        assert_eq!(median, 0_f32);
-        assert_abs_diff_eq!(stddev, 1.04, epsilon = 0.01);
-    }
-
-    #[test]
-    fn test_stats_for_histogram() {
-        let mut histogram = [0_u32; 1024];
-        histogram[10] = 2;
-        histogram[20] = 2;
-        let (mean, stddev, median) = stats_for_histogram(&histogram);
-        assert_eq!(mean, 15.0);
-        assert_eq!(stddev, 5.0);
-        assert_eq!(median, 10);
+        stats = stats_for_roi(&image_5x4,
+                              &Rect::at(0, 0).of_size(5, 4));
+        assert_abs_diff_eq!(stats.mean, 0.526, epsilon = 0.001);
+        assert_eq!(stats.median, 0);
+        assert_abs_diff_eq!(stats.stddev, 1.04, epsilon = 0.01);
     }
 
     #[test]
@@ -1604,7 +1566,7 @@ mod tests {
             2,  4,  6,  8, 10, 12, 14, 16, 18, 20, 22, 24;
             0,  0,  0,  1,  0,  1,  1,  0,  1,  1,  1,  1;
             0,  0,  0,  0,  1,  0,  1,  1,  1,  1,  1,  3);
-        let (candidates, hot_pixel_count, binned_image10, _) =
+        let (candidates, hot_pixel_count, binned_image10, _, _) =
             scan_image_for_candidates(&image_12x4, 1.0, 8.0,
                                       /*detect_hot_pixels=*/true,
                                       /*create_binned_image10=*/true,
@@ -1624,7 +1586,7 @@ mod tests {
            10, 20, 30, 40, 50, 60, 70, 80, 90,100,110;
             2,  4,  6,250, 10, 12, 14, 16, 18, 20, 22;
             0,  0,  0,  1,  0,  1,  1,  0,  1,  1,  1);
-        let (candidates, hot_pixel_count, binned_image10, _) =
+        let (candidates, hot_pixel_count, binned_image10, _, _) =
             scan_image_for_candidates(&image_11x3, 1.0, 8.0,
                                       /*detect_hot_pixels=*/true,
                                       /*create_binned_image10=*/true,
@@ -1640,7 +1602,7 @@ mod tests {
 
         // Same, except with hot pixel detection turned off. Also request
         // 8 bit version of binned image.
-        let (candidates, hot_pixel_count, binned_image10, binned_image8) =
+        let (candidates, hot_pixel_count, binned_image10, binned_image8, _) =
             scan_image_for_candidates(&image_11x3, 1.0, 8.0,
                                       /*detect_hot_pixels=*/false,
                                       /*create_binned_image10=*/true,

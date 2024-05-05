@@ -93,7 +93,7 @@ impl CedarDetect for MyCedarDetect {
         }
 
         let noise_estimate = estimate_noise_from_image(&req_image);
-        let (stars, hot_pixel_count, binned_image) = get_stars_from_image(
+        let (stars, hot_pixel_count, binned_image, _histogram) = get_stars_from_image(
             &req_image, noise_estimate, req.sigma, req.max_size as u32,
             req.use_binned_for_star_candidates, req.detect_hot_pixels,
             req.return_binned);
