@@ -1,3 +1,5 @@
+use std::cmp::{max, min};
+
 pub struct HistogramStats {
     pub mean: f32,
     pub median: usize,
@@ -31,6 +33,44 @@ pub fn stats_for_histogram(histogram: &[u32]) -> HistogramStats {
     }
     let stddev = (second_moment / count as f32).sqrt();
     HistogramStats{mean, median, stddev}
+}
+
+/// Return the histogram bin number N such that the total number of bin entries
+/// at or below N exceeds `fraction` * the total number of bin entries over the
+/// entire histogram.
+pub fn get_level_for_fraction(histogram: &[u32], fraction: f32) -> usize {
+    assert!(fraction >= 0.0);
+    assert!(fraction <= 1.0);
+    let mut count = 0;
+    for h in 0..histogram.len() {
+        count += histogram[h];
+    }
+    let goal = (fraction * count as f32) as u32;
+    count = 0;
+    for h in 0..histogram.len() {
+        count += histogram[h];
+        if count >= goal {
+            return h;
+        }
+    }
+    assert!(false);  // Should not get here.
+    return 0;
+}
+
+/// Return the average of the N highest histogram entry values.
+pub fn average_top_values(histogram: &[u32], num_top_values: usize) -> u8 {
+    let mut accum_count = 0;
+    let mut accum_val: u32 = 0;
+    for bin in (1..256).rev() {
+        let remain = num_top_values - accum_count;
+        if remain == 0 {
+            break;
+        }
+        let count = min(histogram[bin], remain as u32);
+        accum_val += bin as u32 * count;
+        accum_count += count as usize;
+    }
+    max(accum_val / accum_count as u32, 1) as u8
 }
 
 /// Updates `histogram`, removing counts deemed to be contributed by stars. We
