@@ -1,3 +1,6 @@
+# Copyright (c) 2023 Steven Rosenthal smr@dt3.org
+# See LICENSE file in root directory for license terms.
+
 """
 This example loads the tetra3 default database and solves an image using CedarDetect's
 centroid finding and Tetra3's solve_from_centroids().
@@ -26,7 +29,7 @@ def extract_centroids(stub, image):
     return stub.ExtractCentroids(cr)
 
 # Create instance and load default_database.
-t3 = Tetra3('default_database')
+t3 = Tetra3('database_auto_30_10_002')
 
 # Set up to make gRPC calls to CedarDetect centroid finder (it must be running
 # already).
