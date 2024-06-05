@@ -6,6 +6,10 @@ Map hot pixels with a dark exposure.
   Drawback: Adds a workflow complication, need the user's involvement in
     capturing the dark frame.
 
+Investigate subtracting dark frame to reduce fixed pattern noise. Will this
+allow better star detection by eliminating fixed pattern component of noise?
+Can build up a dark frame from operational frames over time, for different
+pointings.
 
 When calling compute_moments() on full res image when binning was used for star
 detection, pass in a map of hot pixels detected during the binning. This will
