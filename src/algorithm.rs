@@ -1029,6 +1029,13 @@ pub fn estimate_background_from_image_region(image: &GrayImage, roi: &Rect)
     stats.mean
 }
 
+/// Estimates the noise level of the given image region.
+pub fn estimate_noise_from_image_region(image: &GrayImage, roi: &Rect)
+                                        -> f32 {
+    let stats = stats_for_roi(&image, &roi);
+    stats.stddev
+}
+
 // Returns mean/median/stddev for the given image region. Excludes bright
 // pixels that are likely to be stars, as we're interested in the statistics
 // of the sky background.
