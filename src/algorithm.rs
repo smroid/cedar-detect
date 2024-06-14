@@ -1113,9 +1113,9 @@ pub fn get_stars_from_image(image: &GrayImage,
                                 /*hot_pixel_count*/i32,
                                 Option<GrayImage>,
                                 [u32; 256]) {
-    // If noise estimate is below 0.5, assume that the image background has been
+    // If noise estimate is below 0.25, assume that the image background has been
     // crushed to black; use a minimum noise value.
-    let noise_estimate8 = f32::max(noise_estimate, 0.5);
+    let noise_estimate8 = f32::max(noise_estimate, 0.25);
 
     let mut stars = Vec::<StarDescription>::new();
 
@@ -1126,11 +1126,11 @@ pub fn get_stars_from_image(image: &GrayImage,
     if use_binned_image {
         let noise_estimate10 = estimate_noise_from_image(
             &binned_image10.as_ref().unwrap());
-        // If noise estimate is below 1.0, assume that the image background has
-        // been crushed to black; use a minimum noise value. We use 1.0 because
+        // If noise estimate is below 0.5, assume that the image background has
+        // been crushed to black; use a minimum noise value. We use 0.5 because
         // while the binning increases pixel values by 4x, it only boosts the noise
         // by 2x. We thus use twice the noise floor of the noise_estimate_8.
-        let noise_estimate10 = f32::max(noise_estimate10, 1.0);
+        let noise_estimate10 = f32::max(noise_estimate10, 0.5);
 
         let candidates_from_binned =
             scan_binned_image_for_candidates(&binned_image10.as_ref().unwrap(),
