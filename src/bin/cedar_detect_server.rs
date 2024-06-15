@@ -95,11 +95,23 @@ impl CedarDetect for MyCedarDetect {
                                             input_image.image_data).unwrap();
         }
 
+        let mut binning = 1;
+        if req.use_binned_for_star_candidates || req.return_binned {
+            binning = match req.binning {
+                None => 2,
+                Some(2) => 2,
+                Some(4) => 4,
+                _ => {
+                    return Err(tonic::Status::invalid_argument(format!(
+                        "Invalid binning {}", req.binning.unwrap())));
+                }
+            }
+        }
+
         let noise_estimate = estimate_noise_from_image(&req_image);
         let (stars, hot_pixel_count, binned_image, _histogram) = get_stars_from_image(
             &req_image, noise_estimate, req.sigma, req.max_size as u32,
-            req.use_binned_for_star_candidates, req.detect_hot_pixels,
-            req.return_binned);
+            binning, req.detect_hot_pixels, req.return_binned);
 
         let mut background_estimate: Option<f32> = None;
         if let Some(estimate_background_region) = req.estimate_background_region {
@@ -119,7 +131,7 @@ impl CedarDetect for MyCedarDetect {
                 &Rect::at(estimate_background_region.origin_x,
                           estimate_background_region.origin_y)
                     .of_size(estimate_background_region.width as u32,
-                             estimate_background_region.height as u32)));
+                             estimate_background_region.height as u32)).0);
         }
 
         if using_shmem {
