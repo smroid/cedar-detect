@@ -1087,12 +1087,7 @@ where usize: From<P>,
 ///   stars; lower `sigma` values yield more stars but increase the likelihood
 ///   of noise-induced false positives. Typical `sigma` values: 5-10.
 ///
-///   `max_size` - CedarDetect clumps adjacent bright pixels to form a single star
-///   candidate. The `max_size` argument governs how large a clump can be before
-///   it is rejected. Note that making `max_size` small can eliminate very
-///   bright stars that "bleed" to many surrounding pixels. `max_size` is always
-///   given in full-resolution units, even if `binning` is 2 or 4.
-///   Typical `max_size` value: 8.
+///   `_max_size` - No longer used. Will be removed on next API change.
 ///
 ///   `binning` 1 (no binning), 2 (2x2 binning), or 4 (4x4 binning). Specifies
 ///   whether `image` should be binned prior to star detction. Note that hot
@@ -1123,14 +1118,15 @@ where usize: From<P>,
 pub fn get_stars_from_image(image: &GrayImage,
                             noise_estimate: f32,
                             sigma: f32,
-                            max_size: u32,
+                            _max_size: u32,
                             binning: u32,
                             detect_hot_pixels: bool,
                             return_binned_image: bool)
                             -> (Vec<StarDescription>,
                                 /*hot_pixel_count*/i32,
                                 Option<GrayImage>,
-                                [u32; 256]) {
+                                [u32; 256])
+{
     match binning {
         1 => {
             if return_binned_image {
@@ -1153,6 +1149,13 @@ pub fn get_stars_from_image(image: &GrayImage,
         scan_image_for_candidates(image, noise_estimate8, sigma, detect_hot_pixels, binning,
                                   /*return_binned_16=*/binning != 1,
                                   /*return_binned_8=*/return_binned_image);
+
+    // CedarDetect clumps adjacent bright pixels to form a single star
+    // candidate. The `max_size` value governs how large a clump can be before
+    // it is rejected. Note that making `max_size` small can eliminate very
+    // bright stars that "bleed" to many surrounding pixels.
+    let max_size = image.dimensions().0 / 100;
+
     if binning != 1 {
         let noise_estimate16 = estimate_noise_from_image(
             &binned_image16.as_ref().unwrap());
