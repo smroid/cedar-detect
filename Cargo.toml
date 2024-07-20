@@ -15,6 +15,7 @@ image = "0.25.1"
 imageproc = "0.25.0"
 libc = "0.2.147"
 log = "0.4.19"
+prctl = "1.0.0"
 prost = "0.12.3"
 prost-types = "0.12.3"
 tokio = { version = "1.32.0", features = ["macros", "rt-multi-thread"] }

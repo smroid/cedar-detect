@@ -12,6 +12,7 @@ use image::{GrayImage};
 use imageproc::rect::Rect;
 use libc::{c_void, close, mmap, munmap, shm_open, O_RDONLY, PROT_READ, MAP_FAILED, MAP_SHARED};
 use log::{debug, info, warn};
+use prctl::set_death_signal;
 
 use ::cedar_detect::algorithm::{estimate_noise_from_image,
                                 estimate_background_from_image_region,
@@ -207,6 +208,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
+
+    // Arrange to die if parent dies.
+    set_death_signal(15).unwrap();
 
     // Listen on any address for the given port.
     let addr = SocketAddr::from(([0, 0, 0, 0], args.port));
