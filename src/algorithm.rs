@@ -359,7 +359,7 @@ struct CandidateFrom1D {
 //   If `return_binned_8`, the histogram is over that image rather than the
 //   input `image`.
 fn scan_image_for_candidates(image: &GrayImage,
-                             noise_estimate: f32, sigma: f32,
+                             noise_estimate: f64, sigma: f64,
                              detect_hot_pixels: bool,
                              binning: u32,
                              return_binned_16: bool,
@@ -502,7 +502,7 @@ fn scan_image_for_candidates(image: &GrayImage,
 
 // `image` Image to be scanned. This is a 10-bit or 12-bit binned image.
 fn scan_binned_image_for_candidates(
-    image: &Gray16Image, noise_estimate: f32, sigma: f32)
+    image: &Gray16Image, noise_estimate: f64, sigma: f64)
     -> Vec<CandidateFrom1D>
 {
     let row_scan_start = Instant::now();
@@ -636,8 +636,8 @@ fn form_blobs_from_candidates(candidates: Vec<CandidateFrom1D>)
 pub struct StarDescription {
     /// Location of star centroid in image coordinates. (0.5, 0.5) corresponds
     /// to the center of the image's upper left pixel.
-    pub centroid_x: f32,
-    pub centroid_y: f32,
+    pub centroid_x: f64,
+    pub centroid_y: f64,
 
     /// Value of the brightest pixel in this star's region. Not background
     /// subtracted.
@@ -645,7 +645,7 @@ pub struct StarDescription {
 
     /// Sum of the u8 pixel values of the star's region. The estimated
     /// background is subtracted.
-    pub brightness: f32,
+    pub brightness: f64,
 
     /// Count of saturated pixel values.
     pub num_saturated: u16,
@@ -705,7 +705,7 @@ fn gate_star_2d<P: Primitive>(
     image: &ImageBuffer<Luma<P>, Vec<P>>,
     full_res_image: &GrayImage,
     binning: u32,
-    noise_estimate: f32, sigma: f32,
+    noise_estimate: f64, sigma: f64,
     detect_hot_pixels: bool,
     max_width: u32, max_height: u32) -> Option<StarDescription>
 where i32: From<P>
@@ -762,7 +762,7 @@ where i32: From<P>
         core_sum += i32::from(pixel_value);
         core_count += 1;
     }
-    let core_mean = core_sum as f32 / core_count as f32;
+    let core_mean = core_sum as f64 / core_count as f64;
 
     if core_width >= 3 && core_height >= 3 {
         // Require that the "inner" core be at least as bright as the outer
@@ -778,7 +778,7 @@ where i32: From<P>
             outer_core_sum += i32::from(pixel_value);
             outer_core_count += 1;
         }
-        let outer_core_mean = outer_core_sum as f32 / outer_core_count as f32;
+        let outer_core_mean = outer_core_sum as f64 / outer_core_count as f64;
         // When including the inner core (core_mean), we should be at least as
         // bright as when excluding the inner core (outer_core_mean).
         if core_mean < outer_core_mean {
@@ -802,7 +802,7 @@ where i32: From<P>
         neighbor_sum += i32::from(pixel_value);
         neighbor_count += 1;
     }
-    let neighbor_mean = neighbor_sum as f32 / neighbor_count as f32;
+    let neighbor_mean = neighbor_sum as f64 / neighbor_count as f64;
     // Core average must be at least as bright as the neighbor average.
     if core_mean < neighbor_mean {
         debug!("Core average {} is less than neighbor average {} for blob {:?}",
@@ -819,7 +819,7 @@ where i32: From<P>
         margin_sum += i32::from(pixel_value);
         margin_count += 1;
     }
-    let margin_mean = margin_sum as f32 / margin_count as f32;
+    let margin_mean = margin_sum as f64 / margin_count as f64;
     if core_mean <= margin_mean {
         debug!("Core average {} is not greater than margin average {} for blob {:?}",
                core_mean, margin_mean, core);
@@ -843,27 +843,27 @@ where i32: From<P>
             perimeter_max = pixel_value;
         }
     }
-    let background_est = perimeter_sum as f32 / perimeter_count as f32;
+    let background_est = perimeter_sum as f64 / perimeter_count as f64;
     debug!("background: {} for blob {:?}", background_est, core);
 
     // Compute a second noise estimate from the perimeter. If we're in clutter
     // such as an illuminated foreground object, this noise estimate will be
     // high, suppressing spurious "star" detections.
-    let mut perimeter_dev_2: f32 = 0.0;
+    let mut perimeter_dev_2: f64 = 0.0;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
         &image, &perimeter, /*include_interior=*/false) {
-        let res = i32::from(pixel_value) as f32 - background_est;
+        let res = i32::from(pixel_value) as f64 - background_est;
         perimeter_dev_2 += res * res;
     }
-    let perimeter_stddev = (perimeter_dev_2 / perimeter_count as f32).sqrt();
-    let max_noise_estimate = f32::max(noise_estimate, perimeter_stddev);
+    let perimeter_stddev = (perimeter_dev_2 / perimeter_count as f64).sqrt();
+    let max_noise_estimate = f64::max(noise_estimate, perimeter_stddev);
 
     // We require the perimeter pixels to be ~uniformly dark. See if any
     // perimeter pixel is too bright compared to the darkest perimeter
     // pixel.
     // The 3x sigma_noise threshold is empirically chosen to yield a low
     // rejection rate for actual sky background perimeter pixels.
-    if (i32::from(perimeter_max) - i32::from(perimeter_min)) as f32 >
+    if (i32::from(perimeter_max) - i32::from(perimeter_min)) as f64 >
         3.0 * sigma * noise_estimate {
         debug!("Perimeter too varied for blob {:?}", core);
         return None;
@@ -922,7 +922,7 @@ where i32: From<P>
 // estimation; the inner pixels of the bounding box are background
 // subtracted and summed to form the brightness value.
 // Returns: (summed pixel values, count of saturated pixels, peak pixel value)
-fn compute_brightness(image: &GrayImage, bounding_box: &Rect) -> (f32, u16, u8) {
+fn compute_brightness(image: &GrayImage, bounding_box: &Rect) -> (f64, u16, u8) {
     let mut boundary_sum: i32 = 0;
     let mut boundary_count: i32 = 0;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
@@ -930,7 +930,7 @@ fn compute_brightness(image: &GrayImage, bounding_box: &Rect) -> (f32, u16, u8) 
         boundary_sum += pixel_value as i32;
         boundary_count += 1;
     }
-    let background_est = boundary_sum as f32 / boundary_count as f32;
+    let background_est = boundary_sum as f64 / boundary_count as f64;
 
     let inset = Rect::at(bounding_box.left() + 1, bounding_box.top() + 1)
         .of_size(bounding_box.width() - 2, bounding_box.height() - 2);
@@ -946,13 +946,13 @@ fn compute_brightness(image: &GrayImage, bounding_box: &Rect) -> (f32, u16, u8) 
         if pixel_value > peak_value {
             peak_value = pixel_value;
         }
-        sum += pixel_value as f32 - background_est;
+        sum += pixel_value as f64 - background_est;
     }
-    (f32::max(sum, 0.0), num_saturated, peak_value)
+    (f64::max(sum, 0.0), num_saturated, peak_value)
 }
 
 // Computes the position of the peak, with sub-pixel interpolation.
-fn compute_peak_coord(image: &GrayImage, bounding_box: &Rect) -> (f32, f32) {
+fn compute_peak_coord(image: &GrayImage, bounding_box: &Rect) -> (f64, f64) {
     let mut horizontal_projection = vec![0u32; bounding_box.width() as usize];
     let mut vertical_projection = vec![0u32; bounding_box.height() as usize];
     let x0 = bounding_box.left();
@@ -962,12 +962,12 @@ fn compute_peak_coord(image: &GrayImage, bounding_box: &Rect) -> (f32, f32) {
         horizontal_projection[(x - x0) as usize] += pixel_value as u32;
         vertical_projection[(y - y0) as usize] += pixel_value as u32;
     }
-    let peak_x = x0 as f32 + peak_coord_1d(horizontal_projection);
-    let peak_y = y0 as f32 + peak_coord_1d(vertical_projection);
+    let peak_x = x0 as f64 + peak_coord_1d(horizontal_projection);
+    let peak_y = y0 as f64 + peak_coord_1d(vertical_projection);
     (peak_x, peak_y)
 }
 
-fn peak_coord_1d(values: Vec<u32>) -> f32 {
+fn peak_coord_1d(values: Vec<u32>) -> f64 {
     // We want a single peak value with lesser neighbors.
     let mut peak_val = 0;
     let mut peak_ind = 0;
@@ -991,23 +991,23 @@ fn peak_coord_1d(values: Vec<u32>) -> f32 {
     // If we have a run of equal-length values, just return the mid-coord of the
     // run. Yuck.
     if peak_run_length > 1 {
-        return peak_ind as f32 + (peak_run_length - 1) as f32 / 2.0;
+        return peak_ind as f64 + (peak_run_length - 1) as f64 / 2.0;
     }
     // If our peak is at either end of the vector, just return its coord. Yuck.
     if peak_ind == 0 || peak_ind == values.len() - 1 {
-        return peak_ind as f32;
+        return peak_ind as f64;
     }
 
     // We have a peak with two lesser neighbors. Apply quadratic interpolation.
     // https://ccrma.stanford.edu/~jos/sasp/Quadratic_Interpolation_Spectral_Peaks.html
-    let a = values[peak_ind - 1] as f32;
-    let b = values[peak_ind] as f32;
-    let c = values[peak_ind + 1] as f32;
+    let a = values[peak_ind - 1] as f64;
+    let b = values[peak_ind] as f64;
+    let c = values[peak_ind + 1] as f64;
     let p = 0.5 * (a - c) / (a - 2.0 * b + c);
     assert!(p >= -0.5);
     assert!(p <= 0.5);
 
-    peak_ind as f32 + p
+    peak_ind as f64 + p
 }
 
 /// Estimates the RMS noise of the given image. A small portion of the image
@@ -1020,7 +1020,7 @@ fn peak_coord_1d(values: Vec<u32>) -> f32 {
 /// measure the noise.
 // P: u8 or u16.
 pub fn estimate_noise_from_image<P: Primitive>(
-    image: &ImageBuffer<Luma<P>, Vec<P>>) -> f32
+    image: &ImageBuffer<Luma<P>, Vec<P>>) -> f64
 where usize: From<P>
 {
     let noise_start = Instant::now();
@@ -1046,7 +1046,7 @@ where usize: From<P>
 
 /// Estimates the background and noise level of the given image region.
 pub fn estimate_background_from_image_region(image: &GrayImage, roi: &Rect)
-                                             -> (f32, f32) {
+                                             -> (f64, f64) {
     let stats = stats_for_roi(&image, &roi);
     (stats.mean, stats.stddev)
 }
@@ -1116,8 +1116,8 @@ where usize: From<P>,
 ///   If `return_binned_image`, the histogram is over that image rather than the
 ///   input `image`.
 pub fn get_stars_from_image(image: &GrayImage,
-                            noise_estimate: f32,
-                            sigma: f32,
+                            noise_estimate: f64,
+                            sigma: f64,
                             _max_size: u32,
                             binning: u32,
                             detect_hot_pixels: bool,
@@ -1141,7 +1141,7 @@ pub fn get_stars_from_image(image: &GrayImage,
 
     // If noise estimate is below 0.25, assume that the image background has been
     // crushed to black; use a minimum noise value.
-    let noise_estimate8 = f32::max(noise_estimate, 0.25);
+    let noise_estimate8 = f64::max(noise_estimate, 0.25);
 
     let mut stars = Vec::<StarDescription>::new();
 
@@ -1162,8 +1162,8 @@ pub fn get_stars_from_image(image: &GrayImage,
         // For 2x2 binning, we double the noise floor. For 4x4 binning, we
         // quadruple the noise floor. Rationale: when binning pixels, the signal
         // increases with N but the noise with sqrt(N).
-        let min_noise = 0.25 * binning as f32;
-        let noise_estimate16 = f32::max(noise_estimate16, min_noise);
+        let min_noise = 0.25 * binning as f64;
+        let noise_estimate16 = f64::max(noise_estimate16, min_noise);
 
         let candidates_from_binned =
             scan_binned_image_for_candidates(&binned_image16.as_ref().unwrap(),
@@ -1211,8 +1211,8 @@ pub struct RegionOfInterestSummary {
     /// unspecified which one's location is reported here. The application logic
     /// should use `histogram` to adjust exposure to avoid too many peak
     /// (saturated) pixels.
-    pub peak_x: f32,
-    pub peak_y: f32,
+    pub peak_x: f64,
+    pub peak_y: f64,
 }
 
 /// Gathers information from a region of interest of an image.
@@ -1239,7 +1239,7 @@ pub struct RegionOfInterestSummary {
 /// The `roi` must exclude the three leftmost and three rightmost image columns.
 /// The `roi` must exclude the three top and three bottom image rows.
 pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
-                                    noise_estimate: f32, sigma: f32)
+                                    noise_estimate: f64, sigma: f64)
                                     -> RegionOfInterestSummary {
     let process_roi_start = Instant::now();
 
@@ -1371,9 +1371,9 @@ mod tests {
         // Leave image as all zeros for now.
         let mut stats = stats_for_roi(&image_5x4,
                                       &Rect::at(0, 0).of_size(5, 4));
-        assert_eq!(stats.mean, 0_f32);
+        assert_eq!(stats.mean, 0_f64);
         assert_eq!(stats.median, 0);
-        assert_eq!(stats.stddev, 0_f32);
+        assert_eq!(stats.stddev, 0_f64);
 
         // Add some noise.
         image_5x4.put_pixel(1, 0, Luma::<u8>([1]));

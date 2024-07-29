@@ -4,9 +4,9 @@
 use std::cmp::{max, min};
 
 pub struct HistogramStats {
-    pub mean: f32,
+    pub mean: f64,
     pub median: usize,
-    pub stddev: f32,
+    pub stddev: f64,
 }
 
 pub fn stats_for_histogram(histogram: &[u32]) -> HistogramStats {
@@ -20,13 +20,13 @@ pub fn stats_for_histogram(histogram: &[u32]) -> HistogramStats {
     if count == 0 {
         return HistogramStats{mean: 0.0, median: 0, stddev: 0.0};
     }
-    let mean = first_moment as f32 / count as f32;
-    let mut second_moment: f32 = 0.0;
+    let mean = first_moment as f64 / count as f64;
+    let mut second_moment: f64 = 0.0;
     let mut sub_count = 0;
     let mut median = 0;
     for h in 0..histogram.len() {
         let bin_count = histogram[h];
-        second_moment += bin_count as f32 * (h as f32 - mean) * (h as f32 - mean);
+        second_moment += bin_count as f64 * (h as f64 - mean) * (h as f64 - mean);
         if sub_count < count / 2 {
             sub_count += bin_count;
             if sub_count >= count / 2 {
@@ -34,21 +34,21 @@ pub fn stats_for_histogram(histogram: &[u32]) -> HistogramStats {
             }
         }
     }
-    let stddev = (second_moment / count as f32).sqrt();
+    let stddev = (second_moment / count as f64).sqrt();
     HistogramStats{mean, median, stddev}
 }
 
 /// Return the histogram bin number N such that the total number of bin entries
 /// at or below N exceeds `fraction` * the total number of bin entries over the
 /// entire histogram.
-pub fn get_level_for_fraction(histogram: &[u32], fraction: f32) -> usize {
+pub fn get_level_for_fraction(histogram: &[u32], fraction: f64) -> usize {
     assert!(fraction >= 0.0);
     assert!(fraction <= 1.0);
     let mut count = 0;
     for h in 0..histogram.len() {
         count += histogram[h];
     }
-    let goal = (fraction * count as f32) as u32;
+    let goal = (fraction * count as f64) as u32;
     count = 0;
     for h in 0..histogram.len() {
         count += histogram[h];
@@ -83,7 +83,7 @@ pub fn average_top_values(histogram: &[u32], num_top_values: usize) -> u8 {
 /// from histogram bins of pixel values greater than `sigma` times the noise
 /// estimate.
 /// What remains is deemed to be the histogram of the non-star image pixels.
-pub fn remove_stars_from_histogram(histogram: &mut [u32], sigma: f32) {
+pub fn remove_stars_from_histogram(histogram: &mut [u32], sigma: f64) {
     let mut pixel_count = 0;
     for h in 0..histogram.len() {
         pixel_count += histogram[h];
@@ -97,8 +97,8 @@ pub fn remove_stars_from_histogram(histogram: &mut [u32], sigma: f32) {
     let stats = stats_for_histogram(&copied_histogram);
     // Any pixel whose value is sigma * stddev above the mean is deemed a star and
     // kicked out of the histogram.
-    let star_cutoff = (stats.mean as f32 +
-                       sigma * f32::max(stats.stddev, 1.0)) as usize;
+    let star_cutoff = (stats.mean +
+                       sigma * f64::max(stats.stddev, 1.0)) as usize;
     for h in 0..histogram.len() {
         if h >= star_cutoff {
             histogram[h] = 0;

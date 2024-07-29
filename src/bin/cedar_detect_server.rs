@@ -114,7 +114,7 @@ impl CedarDetect for MyCedarDetect {
             &req_image, noise_estimate, req.sigma, /*deprecated_max_size=*/1,
             binning, req.detect_hot_pixels, req.return_binned);
 
-        let mut background_estimate: Option<f32> = None;
+        let mut background_estimate: Option<f64> = None;
         if let Some(estimate_background_region) = req.estimate_background_region {
             if estimate_background_region.origin_x < 0 ||
                 estimate_background_region.origin_y < 0 ||

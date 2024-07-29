@@ -32,7 +32,7 @@ struct Args {
 
     /// Statistical significance factor.
     #[arg(short, long, default_value_t = 8.0)]
-    sigma: f32,
+    sigma: f64,
 
     /// Maximum star size.
     #[arg(short, long, default_value_t = 8)]
@@ -108,7 +108,7 @@ fn process_file(file: &str, args: &Args) {
           width, height, noise_estimate, background_estimate);
     info!("Star extraction found {} stars in {:?}", stars.len(), elapsed);
     info!("{}ms per megapixel\n",
-          elapsed.as_secs_f32() * 1000.0 / ((width * height) as f32 / 1000000.0));
+          elapsed.as_secs_f64() * 1000.0 / ((width * height) as f64 / 1000000.0));
 
     // Scribble marks into the image showing where we found stars.
     let mut img_color = img.into_rgb8();

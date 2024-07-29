@@ -8,6 +8,9 @@ import "google/protobuf/duration.proto";
 // In top-level cedar-solve dir:
 // python scripts/compile_proto.py
 
+// In cedar-detect/python dir:
+// python -m grpc_tools.protoc -I../src/proto --python_out=. --pyi_out=. --grpc_python_out=. ../src/proto/cedar_detect.proto
+
 package cedar_detect;
 
 message CentroidsRequest {
@@ -22,7 +25,7 @@ message CentroidsRequest {
   // values yield more stars but increase the likelihood of noise-induced false
   // positives.
   // Typical `sigma` values: 5-10.
-  float sigma = 2;
+  double sigma = 2;
 
   int32 max_size = 3 [deprecated=true];
 
@@ -65,10 +68,10 @@ message Rectangle {
 
 message CentroidsResult {
   // Estimated RMS noise level of the request's `input_image`.
-  float noise_estimate = 1;
+  double noise_estimate = 1;
 
   // Estimated background level of the request's `estimate_background_region`.
-  optional float background_estimate = 7;
+  optional double background_estimate = 7;
 
   // The number of hot pixels seen. See algorithm implementation for more
   // information about hot pixels.
@@ -111,7 +114,7 @@ message StarCentroid {
 
   // Sum of the uint8 pixel values of the star's region. The estimated
   // background is subtracted.
-  float brightness = 4;
+  double brightness = 4;
 
   // Count of saturated pixel values.
   int32 num_saturated = 6;
@@ -120,8 +123,8 @@ message StarCentroid {
 message ImageCoord {
   // A location in full resolution image coordinates. (0.5, 0.5) corresponds to
   // the center of the image's upper left pixel.
-  float x = 1;
-  float y = 2;
+  double x = 1;
+  double y = 2;
 }
 
 service CedarDetect {
