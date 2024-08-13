@@ -103,8 +103,12 @@ message Image {
   bytes image_data = 3;
 
   // If present, identifies a shm_open() shared memory object in which the
-  // image data has been written.
+  // image data has been written. This should be unchanged between requests.
   optional string shmem_name = 4;
+
+  // The server must reopen `shmem_name` because the client has re-created
+  // it with a new size.
+  bool reopen_shmem = 5;
 }
 
 // Summarizes a star-like spot found by the CedarDetect algorithm.

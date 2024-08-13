@@ -4,13 +4,15 @@
 use std::ffi::CString;
 use std::io::Error;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use clap::Parser;
 use env_logger;
 use image::{GrayImage};
 use imageproc::rect::Rect;
-use libc::{c_void, close, mmap, munmap, shm_open, O_RDONLY, PROT_READ, MAP_FAILED, MAP_SHARED};
+use libc::{c_int, c_void, close, mmap, munmap, shm_open,
+           O_RDONLY, PROT_READ, MAP_FAILED, MAP_SHARED};
 use log::{debug, info, warn};
 use prctl::set_death_signal;
 
@@ -27,7 +29,43 @@ pub mod cedar_detect {
 }
 
 struct MyCedarDetect {
-    // No server state; pure function calls.
+    fd: Arc<Mutex<Option<c_int>>>,
+}
+
+impl MyCedarDetect {
+    fn open(&self, name: &CString) -> Result<c_int, tonic::Status> {
+        let open_fd;
+        unsafe {
+            open_fd = shm_open(name.as_ptr(), O_RDONLY, 0);
+            if open_fd < 0 {
+                let msg = format!(
+                    "Could not open shared memory at {:?}: errno {}",
+                    name, Error::last_os_error().raw_os_error().unwrap());
+                warn!("{}", msg);
+                // Clever client-side logic can recognize the INTERNAL error and
+                // fall back to not using shared memory.
+                return Err(tonic::Status::internal(msg))
+            }
+        }
+        Ok(open_fd)
+    }
+
+    fn close(&self, fd: c_int) {
+        unsafe {
+            if close(fd) == -1 {
+                warn!("Could not close shared memory file: errno {}",
+                      Error::last_os_error().raw_os_error().unwrap());
+            }
+        }
+    }
+}
+
+impl Drop for MyCedarDetect {
+    fn drop(&mut self) {
+        let mut fd_ref = self.fd.lock().unwrap();
+        self.close(fd_ref.unwrap());
+        *fd_ref = None;
+    }
 }
 
 #[tonic::async_trait]
@@ -46,36 +84,30 @@ impl CedarDetect for MyCedarDetect {
         let input_image = req.input_image.unwrap();
 
         let req_image;
-        let mut fd = 0;
         let mut addr: *mut c_void = std::ptr::null_mut();
         let mut num_pixels = 0;
         let using_shmem = input_image.shmem_name.is_some();
         if using_shmem {
+            let mut fd_ref = self.fd.lock().unwrap();
+            if input_image.reopen_shmem {
+                self.close(fd_ref.unwrap());
+                *fd_ref = None;
+            }
+
             num_pixels = (input_image.width * input_image.height) as usize;
             let name = CString::new(input_image.shmem_name.unwrap()).unwrap();
             debug!("Using shared memory at {:?}", name);
+            if fd_ref.is_none() {
+                *fd_ref = Some(self.open(&name)?);
+            }
             unsafe {
-                fd = shm_open(name.as_ptr(), O_RDONLY, 0);
-                if fd < 0 {
-                    let msg = format!(
-                        "Could not open shared memory at {:?}: errno {}",
-                        name, Error::last_os_error().raw_os_error().unwrap());
-                    warn!("{}", msg);
-                    // Clever client-side logic can recognize the INTERNAL error and
-                    // fall back to not using shared memory.
-                    return Err(tonic::Status::internal(msg))
-                }
                 addr = mmap(std::ptr::null_mut(), num_pixels, PROT_READ,
-                            MAP_SHARED, fd, 0);
+                            MAP_SHARED, fd_ref.unwrap(), 0);
                 if addr == MAP_FAILED {
                     let msg = format!(
                         "Could not mmap shared memory at {:?} for {} bytes: errno {}",
                         name, num_pixels, Error::last_os_error().raw_os_error().unwrap());
                     warn!("{}", msg);
-                    if close(fd) == -1 {
-                        warn!("Could not close shared memory file: errno {}",
-                              Error::last_os_error().raw_os_error().unwrap());
-                    }
                     return Err(tonic::Status::internal(msg))
                 }
                 // We are violating the invariant that 'addr' must have been
@@ -144,10 +176,6 @@ impl CedarDetect for MyCedarDetect {
                     warn!("Could not munmap shared memory: errno {}",
                           Error::last_os_error().raw_os_error().unwrap());
                 }
-                if close(fd) == -1 {
-                    warn!("Could not close shared memory file: errno {}",
-                          Error::last_os_error().raw_os_error().unwrap());
-                }
             }
         }
 
@@ -184,6 +212,7 @@ impl CedarDetect for MyCedarDetect {
                     height: bimg.height() as i32,
                     image_data: bimg.into_raw(),
                     shmem_name: None,
+                    reopen_shmem: false,
                 })
             } else {
                 None
@@ -219,7 +248,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic::transport::Server::builder()
         .accept_http1(true)
         .layer(GrpcWebLayer::new())
-        .add_service(CedarDetectServer::new(MyCedarDetect{}))
+        .add_service(CedarDetectServer::new(MyCedarDetect{
+            fd: Arc::new(Mutex::new(None)),
+        }))
         .serve(addr)
         .await?;
     Ok(())
