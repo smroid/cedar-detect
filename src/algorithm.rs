@@ -1294,11 +1294,16 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
 
     // Apply centroiding to get sub-pixel resolution for peak_x/y.
     let bounding_box = Rect::at(peak_x - 3, peak_y - 3).of_size(7, 7);
-    let (x, y) = compute_peak_coord(&cleaned_image, &bounding_box);
+    let (mut x, mut y) = compute_peak_coord(&cleaned_image, &bounding_box);
+    x += 0.5;
+    y += 0.5;
+    // Constrain x/y to be within ROI.
+    x = cmp::max_by(x, roi.left() as f64, |a,b| a.partial_cmp(b).unwrap());
+    x = cmp::min_by(x, roi.right() as f64, |a,b| a.partial_cmp(b).unwrap());
+    y = cmp::max_by(y, roi.top() as f64, |a,b| a.partial_cmp(b).unwrap());
+    y = cmp::min_by(y, roi.bottom() as f64, |a,b| a.partial_cmp(b).unwrap());
     debug!("ROI processing completed in {:?}", process_roi_start.elapsed());
-    RegionOfInterestSummary{histogram,
-                            peak_x: x + 0.5,
-                            peak_y: y + 0.5}
+    RegionOfInterestSummary{histogram, peak_x: x, peak_y: y}
 }
 
 #[cfg(test)]
@@ -2114,9 +2119,49 @@ mod tests {
         assert_eq!(roi_summary.histogram[32], 1);
         // The hot pixel is not the peak.
         assert_abs_diff_eq!(roi_summary.peak_x,
-                            5.37, epsilon = 0.01);
+                            5.0, epsilon = 0.01);
         assert_abs_diff_eq!(roi_summary.peak_y,
-                            4.52, epsilon = 0.01);
+                            4.0, epsilon = 0.01);
+    }
+
+    #[test]
+    fn test_summarize_region_of_interest_peak_upper_left() {
+        let roi = Rect::at(3, 3).of_size(3, 2);
+        let image_9x9 = gray_image!(
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  99, 99, 69, 9,  9,  9,  9,  9;
+            9,  99, 80, 60, 50,  9,  9,  9,  9;
+            9,  69, 60, 50, 40, 10, 9,  9,  9;
+            9,  9,  50, 40, 20, 10, 9, 9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9);
+        let roi_summary = summarize_region_of_interest(
+            &image_9x9, &roi, 1.0, 5.0);
+        assert_abs_diff_eq!(roi_summary.peak_x,
+                            3.0, epsilon = 0.01);
+        assert_abs_diff_eq!(roi_summary.peak_y,
+                            3.0, epsilon = 0.01);
+    }
+
+    #[test]
+    fn test_summarize_region_of_interest_peak_lower_right() {
+        let roi = Rect::at(3, 3).of_size(3, 2);
+        let image_9x9 = gray_image!(
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9, 20, 40, 50,  9,  9;
+            9,  9,  9,  9, 40, 50, 60,  9,  9;
+            9,  9,  9,  9, 50, 60, 80,  9,  9;
+            9,  9,  9,  9, 59, 69, 89,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9);
+        let roi_summary = summarize_region_of_interest(
+            &image_9x9, &roi, 1.0, 5.0);
+        assert_abs_diff_eq!(roi_summary.peak_x,
+                            5.0, epsilon = 0.01);
+        assert_abs_diff_eq!(roi_summary.peak_y,
+                            4.0, epsilon = 0.01);
     }
 
 }  // mod tests.
