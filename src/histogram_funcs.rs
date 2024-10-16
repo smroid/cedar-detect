@@ -38,6 +38,61 @@ pub fn stats_for_histogram(histogram: &[u32]) -> HistogramStats {
     HistogramStats{mean, median, stddev}
 }
 
+/// Given a histogram of a row's u8 data, and the width of the row, return
+/// an estimate of the row's dark level (u8 range, as f32).
+pub fn estimate_row_dark_level(row_histogram: &[usize; 256], width: usize) -> f32 {
+    // Method: exclude the bottom 1% of values. Compute the mean of the next
+    // 1% of values.
+    let one_percent = width / 100;
+    if one_percent == 0 {
+        // Too little data; just return the lowest non-zero bin.
+        for h in 0..row_histogram.len() {
+            if row_histogram[h] > 0 {
+                return h as f32;
+            }
+        }
+    }
+    // Skip first 'one_percent' of non-zero values.
+    let mut skip_count = one_percent;
+    let mut cur_bin = 0;
+    let mut count_remaining = 0_usize;
+    for h in 0..row_histogram.len() {
+        let bin_count = row_histogram[h];
+        if bin_count == 0 {
+            continue;
+        }
+        if bin_count < skip_count {
+            skip_count -= bin_count;
+            continue;
+        }
+        cur_bin = h;
+        count_remaining = bin_count - skip_count;
+        break;
+    }
+    // We've skipped the first 'one_percent'. Start accumulating
+    // the next 'one_percent'.
+    if count_remaining >= one_percent {
+        return cur_bin as f32;
+    }
+    let mut accum = cur_bin * count_remaining;
+    cur_bin += 1;
+    let mut accum_count = one_percent - count_remaining;
+
+    for h in cur_bin..row_histogram.len() {
+        let bin_count = row_histogram[h];
+        if bin_count < accum_count {
+            accum += h * bin_count;
+            accum_count -= bin_count;
+            continue;
+        }
+        accum += h * accum_count;
+        break;
+    }
+
+    accum as f32 / one_percent as f32
+}
+
+
 /// Return the histogram bin number N such that the total number of bin entries
 /// at or below N exceeds `fraction` * the total number of bin entries over the
 /// entire histogram.
@@ -121,7 +176,7 @@ fn trim_histogram(histogram: &mut [u32], count_to_keep: u32) {
 
 #[cfg(test)]
 mod tests {
-    use crate::histogram_funcs::stats_for_histogram;
+    use crate::histogram_funcs::{estimate_row_dark_level, stats_for_histogram};
 
     #[test]
     fn test_stats_for_histogram() {
@@ -132,6 +187,37 @@ mod tests {
         assert_eq!(stats.mean, 15.0);
         assert_eq!(stats.median, 10);
         assert_eq!(stats.stddev, 5.0);
+    }
+
+    #[test]
+    fn test_estimate_row_dark_level_small_width() {
+        let mut row_histogram = [0_usize; 256];
+
+        // Width is small, so 1% count underflows.
+        row_histogram[2] = 1;
+        row_histogram[3] = 9;
+        assert_eq!(estimate_row_dark_level(&row_histogram, 10), 2.0);
+    }
+
+    #[test]
+    fn test_estimate_row_dark_level_same_bin_after_skip() {
+        let mut row_histogram = [0_usize; 256];
+
+        row_histogram[2] = 5;  // Skipped.
+        row_histogram[4] = 15;  // First 5 skipped.
+        row_histogram[10] = 980;
+        assert_eq!(estimate_row_dark_level(&row_histogram, 1000), 4.0);
+    }
+
+    #[test]
+    fn test_estimate_row_dark_level_next_bins_after_skip() {
+        let mut row_histogram = [0_usize; 256];
+
+        row_histogram[2] = 5;  // Skipped.
+        row_histogram[4] = 5;  // Skipped.
+        row_histogram[6] = 5;
+        row_histogram[8] = 985;
+        assert_eq!(estimate_row_dark_level(&row_histogram, 1000), 7.0);
     }
 
 }  // mod tests.
