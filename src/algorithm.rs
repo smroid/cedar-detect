@@ -124,7 +124,9 @@ use imageproc::rect::Rect;
 use log::{debug};
 
 use crate::histogram_funcs::{HistogramStats,
-                             remove_stars_from_histogram, stats_for_histogram};
+                             estimate_row_dark_level,
+                             remove_stars_from_histogram,
+                             stats_for_histogram};
 
 // When get_stars_from_image() is called with the 'use_binned_image' option, an
 // intermediate 2x2 or 4x4 binned image is formed by summing pixel values. This
@@ -337,6 +339,9 @@ struct CandidateFrom1D {
 //     satisfying other criteria.
 // `detect_hot_pixels` Determines whether hot pixel detection/substitution is
 //     done.
+// `normalize_rows` Determines whether rows are normalized to have the same dark
+//     level. See IMX296mono notes below. Relevant only when binning>1, ignored
+//     otherwise.
 // `binning` 1 (no binning), 2 (2x2 binning), or 4 (4x4 binning). Note that hot
 //     pixels are replaced during the binning process if `detect_hot_pixels` is
 //     true. If `binning` is 2 or 4, then one or both of `return_binned_16` and
@@ -361,6 +366,7 @@ struct CandidateFrom1D {
 fn scan_image_for_candidates(image: &GrayImage,
                              noise_estimate: f64, sigma: f64,
                              detect_hot_pixels: bool,
+                             normalize_rows: bool,
                              binning: u32,
                              return_binned_16: bool,
                              return_binned_8: bool)
@@ -380,6 +386,7 @@ fn scan_image_for_candidates(image: &GrayImage,
         }
     };
 
+    let mut row_histogram: [usize; 256] = [0; 256];
     let mut histogram: [u32; 256] = [0; 256];
 
     let row_scan_start = Instant::now();
@@ -408,6 +415,7 @@ fn scan_image_for_candidates(image: &GrayImage,
     // Number of input rows corresponding to binned output rows. We don't process
     // final input row(s) corresponding to a partial final binned output row.
     let input_row_count = binned_height << shift;
+    let mut binned_row_dark_level = 0_f32;
     for rownum in 0..input_row_count {
         // Get the slice of image_pixels corresponding to this row.
         let row_pixels: &[u8] = &image_pixels.as_slice()
@@ -427,14 +435,14 @@ fn scan_image_for_candidates(image: &GrayImage,
                 binned_slice.fill(0);
             }
             if binning == 2 {
-                binned_slice[0] += u16::from(row_pixels[0]);
-                binned_slice[0] += u16::from(row_pixels[1]);
-                binned_slice[1] += u16::from(row_pixels[2]);
+                binned_slice[0] += row_pixels[0] as u16;
+                binned_slice[0] += row_pixels[1] as u16;
+                binned_slice[1] += row_pixels[2] as u16;
             } else {
                 // binning == 4
-                binned_slice[0] += u16::from(row_pixels[0]);
-                binned_slice[0] += u16::from(row_pixels[1]);
-                binned_slice[0] += u16::from(row_pixels[2]);
+                binned_slice[0] += row_pixels[0] as u16;
+                binned_slice[0] += row_pixels[1] as u16;
+                binned_slice[0] += row_pixels[2] as u16;
             }
         }
         // Slide a 7 pixel gate across the row.
@@ -442,11 +450,11 @@ fn scan_image_for_candidates(image: &GrayImage,
             center_x += 1;
             let (pixel_value, result_type) = gate_star_1d(
                 gate, sigma_noise_2, sigma_noise_3, detect_hot_pixels);
-            if !return_binned_8 {
-                histogram[pixel_value as usize] += 1;
-            }
-            if binning != 1 {
-                binned_slice[center_x >> shift] += u16::from(pixel_value);
+            if binning != 1 || !return_binned_8 {
+                row_histogram[pixel_value as usize] += 1;
+                if binning != 1 {
+                    binned_slice[center_x >> shift] += pixel_value as u16;
+                }
             }
             match result_type {
                 ResultType::Uninteresting => (),
@@ -457,32 +465,72 @@ fn scan_image_for_candidates(image: &GrayImage,
                 ResultType::HotPixel => { hot_pixel_count += 1; },
             }
         }
+        if !return_binned_8 {
+            for h in 0..row_histogram.len() {
+                histogram[h] += row_histogram[h] as u32;
+            }
+        }
         center_x += 1;
         if binning != 1 {
             while center_x < width - (binning - 1) {
-                binned_slice[center_x >> shift] += u16::from(row_pixels[center_x]);
+                binned_slice[center_x >> shift] += row_pixels[center_x] as u16;
                 center_x += 1;
             }
             // For width that is multiple of binning, include final pixel in row.
             if width & (binning - 1) == 0 {
-                binned_slice[center_x >> shift] += u16::from(row_pixels[center_x]);
+                binned_slice[center_x >> shift] += row_pixels[center_x] as u16;
             }
+            // The IMX296mono camera on Raspberry Pi Zero 2 W has a noise
+            // problem that causes some rows to differ in offset. We estimate
+            // the dark level for each row and equalize all rows to the same
+            // 'bias' dark level during the binning process.
+            binned_row_dark_level += estimate_row_dark_level(&row_histogram, width - 6);
             if rownum & (binning - 1) == binning - 1 {
+                let bias = 2 << (shift*2);
+                let int_binned_row_dark_level = if normalize_rows {
+                    (binned_row_dark_level * binning as f32) as i16 - bias
+                } else {
+                    0
+                };
+                binned_row_dark_level = 0.0;
+
                 let binned_rownum = rownum >> shift;
+                let binned_image16_row: &mut[u16] = &mut binned_image16_data.as_mut_slice()
+                    [binned_rownum * binned_width .. (binned_rownum+1) * binned_width];
                 if return_binned_8 {
-                    let binned_image16_row: &mut[u16] = &mut binned_image16_data.as_mut_slice()
-                        [binned_rownum * binned_width .. (binned_rownum+1) * binned_width];
                     let binned_image8_row: &mut[u8] = &mut binned_image8_data.as_mut_slice()
                         [binned_rownum * binned_width .. (binned_rownum+1) * binned_width];
                     for x in 0..binned_width {
-                        let binned_pixel = (binned_image16_row[x] >> (shift*2)) as u8;
-                        histogram[binned_pixel as usize] += 1;
-                        binned_image8_row[x] = binned_pixel;
+                        let mut binned_pixel = binned_image16_row[x] as i16;
+                        // TODO: make this flag controlled (zero int_binned_row_dark_level).
+                        binned_pixel -= int_binned_row_dark_level;
+                        if binned_pixel < 0 {
+                            binned_pixel = 0;
+                        }
+                        if return_binned_16 {
+                            binned_image16_row[x] = binned_pixel as u16;
+                        }
+                        let binned_pixel_u8 = (binned_pixel >> (shift*2)) as u8;
+                        histogram[binned_pixel_u8 as usize] += 1;
+                        binned_image8_row[x] = binned_pixel_u8;
+                    }
+                } else {
+                    assert!(return_binned_16);
+                    for x in 0..binned_width {
+                        let mut binned_pixel = binned_image16_row[x] as i16;
+                        binned_pixel -= int_binned_row_dark_level;
+                        if binned_pixel < 0 {
+                            binned_pixel = 0;
+                        }
+                        binned_image16_row[x] = binned_pixel as u16;
                     }
                 }
             }
+        }  // binning != 1
+        if binning != 1 || !return_binned_8 {
+            row_histogram = [0; 256];
         }
-    }
+    }  // Iterate over rows.
     debug!("Image scan found {} candidates and {} hot pixels in {:?}",
           candidates.len(), hot_pixel_count, row_scan_start.elapsed());
     let mut binned16_result: Option<Gray16Image> = None;
@@ -532,7 +580,6 @@ fn scan_binned_image_for_candidates(
           candidates.len(), row_scan_start.elapsed());
     candidates
 }
-
 
 #[derive(Debug)]
 struct Blob {
@@ -1025,19 +1072,22 @@ where usize: From<P>
 {
     let noise_start = Instant::now();
     let (width, height) = image.dimensions();
-    let box_size = cmp::min(30, cmp::min(width, height) / 4);
+
+    // The IMX296mono camera on Raspberry Pi Zero 2 W has a noise problem that
+    // causes some rows to differ in offset. We thus use horizontal cuts within
+    // a single row when estimating noise, to avoid possible between-row level
+    // variations.
+    let cut_size = cmp::min(30, width / 4);
+
     let mut stats_vec = Vec::<HistogramStats>::new();
     // Sample three areas across the horizontal midline of the image.
     stats_vec.push(stats_for_roi(image, &Rect::at(
-        (width*1/4 - box_size/2) as i32, (height/2 - box_size/2) as i32)
-                                 .of_size(box_size, box_size)));
+        (width*1/4 - cut_size/2) as i32, (height/2) as i32).of_size(cut_size, 1)));
     stats_vec.push(stats_for_roi(image, &Rect::at(
-        (width*2/4 - box_size/2) as i32, (height/2 - box_size/2) as i32)
-                                 .of_size(box_size, box_size)));
+        (width*2/4 - cut_size/2) as i32, (height/2) as i32).of_size(cut_size, 1)));
     stats_vec.push(stats_for_roi(image, &Rect::at(
-        (width*3/4 - box_size/2) as i32, (height/2 - box_size/2) as i32)
-                                 .of_size(box_size, box_size)));
-    // Pick the darkest box by mean value.
+        (width*3/4 - cut_size/2) as i32, (height/2) as i32).of_size(cut_size, 1)));
+    // Pick the darkest cut by mean value.
     stats_vec.sort_by(|a, b| a.mean.partial_cmp(&b.mean).unwrap());
     let stddev = stats_vec[0].stddev;
     debug!("Noise estimate {} found in {:?}", stddev, noise_start.elapsed());
@@ -1089,6 +1139,9 @@ where usize: From<P>,
 ///
 ///   `_max_size` - No longer used. Will be removed on next API change.
 ///
+///   `normalize_rows` Determines whether rows are normalized to have the same dark
+///   level. Relevant only when binning>1, ignored otherwise.
+///
 ///   `binning` 1 (no binning), 2 (2x2 binning), or 4 (4x4 binning). Specifies
 ///   whether `image` should be binned prior to star detction. Note that hot
 ///   pixels are replaced during the binning process if `detect_hot_pixels` is
@@ -1119,6 +1172,7 @@ pub fn get_stars_from_image(image: &GrayImage,
                             noise_estimate: f64,
                             sigma: f64,
                             _max_size: u32,
+                            normalize_rows: bool,
                             binning: u32,
                             detect_hot_pixels: bool,
                             return_binned_image: bool)
@@ -1146,7 +1200,8 @@ pub fn get_stars_from_image(image: &GrayImage,
     let mut stars = Vec::<StarDescription>::new();
 
     let (candidates, hot_pixel_count, binned_image16, binned_image8, histogram) =
-        scan_image_for_candidates(image, noise_estimate8, sigma, detect_hot_pixels, binning,
+        scan_image_for_candidates(image, noise_estimate8, sigma, detect_hot_pixels,
+                                  normalize_rows, binning,
                                   /*return_binned_16=*/binning != 1,
                                   /*return_binned_8=*/return_binned_image);
 
