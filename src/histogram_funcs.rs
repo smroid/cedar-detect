@@ -92,6 +92,48 @@ pub fn estimate_row_dark_level(row_histogram: &[usize; 256], width: usize) -> f3
     accum as f32 / one_percent as f32
 }
 
+/// Shift the histogram bins by the indicated amount.
+pub fn shift_histogram(histogram: &mut[usize], shift: i32) {
+    let num_bins = histogram.len();
+    if num_bins <= 1 {
+        return;
+    }
+    if shift > 0 {
+        let shift = min(shift as usize, num_bins-1);
+        // Move histogram bins to the right. At the top of the histogram,
+        // accumulate incoming bin values. At the bottom of the histogram,
+        // zero the vacated bins.
+        let top_bin = num_bins - 1;
+        for i in 1..=shift {
+            histogram[top_bin] += histogram[top_bin - i];
+        }
+        let mut bin = top_bin - 1;
+        while bin >= shift {
+            histogram[bin] = histogram[bin - shift];
+            bin -= 1;
+        }
+        for i in 0..shift {
+            histogram[i] = 0;
+        }
+    }
+    if shift < 0 {
+        let shift = min(-shift as usize, num_bins-1);
+        // Move histogram bins to the left. At the bottom of the histogram,
+        // accumulate incoming bin values. At the top of the histogram,
+        // zero the vacated bins.
+        for i in 1..=shift {
+            histogram[0] += histogram[i];
+        }
+        let mut bin = 1;
+        while bin < num_bins - shift {
+            histogram[bin] = histogram[bin + shift];
+            bin += 1;
+        }
+        for i in 1..=shift {
+            histogram[num_bins - i] = 0;
+        }
+    }
+}
 
 /// Return the histogram bin number N such that the total number of bin entries
 /// at or below N exceeds `fraction` * the total number of bin entries over the
@@ -176,7 +218,8 @@ fn trim_histogram(histogram: &mut [u32], count_to_keep: u32) {
 
 #[cfg(test)]
 mod tests {
-    use crate::histogram_funcs::{estimate_row_dark_level, stats_for_histogram};
+    use crate::histogram_funcs::{estimate_row_dark_level, shift_histogram,
+                                 stats_for_histogram};
 
     #[test]
     fn test_stats_for_histogram() {
@@ -218,6 +261,88 @@ mod tests {
         row_histogram[6] = 5;
         row_histogram[8] = 985;
         assert_eq!(estimate_row_dark_level(&row_histogram, 1000), 7.0);
+    }
+
+    #[test]
+    fn test_shift_single_bin_histogram() {
+        let mut histogram = [1];
+        shift_histogram(&mut histogram, 0);
+        assert_eq!(histogram[0], 1);
+        shift_histogram(&mut histogram, 1);
+        assert_eq!(histogram[0], 1);
+        shift_histogram(&mut histogram, 2);
+        assert_eq!(histogram[0], 1);
+        shift_histogram(&mut histogram, -1);
+        assert_eq!(histogram[0], 1);
+        shift_histogram(&mut histogram, -2);
+        assert_eq!(histogram[0], 1);
+    }
+
+    #[test]
+    fn test_shift_histogram() {
+        // Shift right by varying amounts.
+        let mut histogram = [1, 2, 3, 4];
+        shift_histogram(&mut histogram, 0);
+        assert_eq!(histogram[0], 1);
+        assert_eq!(histogram[1], 2);
+        assert_eq!(histogram[2], 3);
+        assert_eq!(histogram[3], 4);
+
+        shift_histogram(&mut histogram, 1);
+        assert_eq!(histogram[0], 0);
+        assert_eq!(histogram[1], 1);
+        assert_eq!(histogram[2], 2);
+        assert_eq!(histogram[3], 7);
+
+        histogram = [1, 2, 3, 4];
+        shift_histogram(&mut histogram, 2);
+        assert_eq!(histogram[0], 0);
+        assert_eq!(histogram[1], 0);
+        assert_eq!(histogram[2], 1);
+        assert_eq!(histogram[3], 9);
+
+        histogram = [1, 2, 3, 4];
+        shift_histogram(&mut histogram, 3);
+        assert_eq!(histogram[0], 0);
+        assert_eq!(histogram[1], 0);
+        assert_eq!(histogram[2], 0);
+        assert_eq!(histogram[3], 10);
+
+        histogram = [1, 2, 3, 4];
+        shift_histogram(&mut histogram, 4);
+        assert_eq!(histogram[0], 0);
+        assert_eq!(histogram[1], 0);
+        assert_eq!(histogram[2], 0);
+        assert_eq!(histogram[3], 10);
+
+        // Shift left by varying amounts.
+        histogram = [1, 2, 3, 4];
+        shift_histogram(&mut histogram, -1);
+        assert_eq!(histogram[0], 3);
+        assert_eq!(histogram[1], 3);
+        assert_eq!(histogram[2], 4);
+        assert_eq!(histogram[3], 0);
+
+        histogram = [1, 2, 3, 4];
+        shift_histogram(&mut histogram, -2);
+        assert_eq!(histogram[0], 6);
+        assert_eq!(histogram[1], 4);
+        assert_eq!(histogram[2], 0);
+        assert_eq!(histogram[3], 0);
+
+        histogram = [1, 2, 3, 4];
+        shift_histogram(&mut histogram, -3);
+        assert_eq!(histogram[0], 10);
+        assert_eq!(histogram[1], 0);
+        assert_eq!(histogram[2], 0);
+        assert_eq!(histogram[3], 0);
+
+        histogram = [1, 2, 3, 4];
+        shift_histogram(&mut histogram, -4);
+        assert_eq!(histogram[0], 10);
+        assert_eq!(histogram[1], 0);
+        assert_eq!(histogram[2], 0);
+        assert_eq!(histogram[3], 0);
     }
 
 }  // mod tests.
