@@ -25,8 +25,8 @@
 //! # Intended applications
 //!
 //! CedarDetect is designed to be used with astrometry and plate solving systems
-//! such as [Tetra3](https://github.com/esa/tetra3). It can also be incorporated
-//! into satellite star trackers.
+//! such as [Cedar-Solve](https://github.com/smroid/cedar-solve). It can also be
+//! incorporated into satellite star trackers.
 //!
 //! A goal of CedarDetect is to allow such applications to achieve fast response
 //! times. CedarDetect contributes to this by running quickly and by tolerating a
@@ -65,10 +65,11 @@
 //!
 //! The criteria used by CedarDetect to efficiently detect stars are designed
 //! around the characteristics of a star image's pixels compared to surrounding
-//! pixels. CedarDetect can thus be confused when stars are too closely spaced, or
-//! a star is close to a hot pixel. Such situations will usually cause closely
-//! spaced stars to fail to be detected. Note that for applications such as
-//! plate solving, this is probably for the better.
+//! pixels. CedarDetect can thus be confused when stars are too closely spaced,
+//! or a star is close to a hot pixel, or if image shake causes star images to
+//! be "doubled". Such situations will usually cause closely spaced stars to
+//! fail to be detected. Note that for applications such as plate solving, this
+//! is probably for the better.
 //!
 //! ## Imaging requirements
 //!
@@ -1195,7 +1196,7 @@ where usize: From<P>,
 ///   `_max_size` - No longer used. Will be removed on next API change.
 ///
 ///   `normalize_rows` Determines whether rows are normalized to have the same dark
-///   level. Relevant only when binning>1, ignored otherwise.
+///   level.
 ///
 ///   `binning` 1 (no binning), 2 (2x2 binning), or 4 (4x4 binning). Specifies
 ///   whether `image` should be binned prior to star detction. Note that hot
@@ -1211,7 +1212,7 @@ where usize: From<P>,
 ///   Invalid if `binning` is 1.
 ///
 /// # Returns
-/// Vec<[StarDescription]>, in order of descending brightness.
+/// Vec<[StarDescription]>, in order of descending estimated brightness.
 ///
 /// i32: The number of hot pixels seen. See implementation for more information
 /// about hot pixels.
