@@ -170,7 +170,11 @@ pub fn average_top_values(histogram: &[u32], num_top_values: usize) -> u8 {
         accum_val += bin as u32 * count;
         accum_count += count as usize;
     }
-    max(accum_val / accum_count as u32, 1) as u8
+    if accum_count == 0 {
+        0
+    } else {
+        max(accum_val / accum_count as u32, 1) as u8
+    }
 }
 
 /// Updates `histogram`, removing counts deemed to be contributed by stars. We
