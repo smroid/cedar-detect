@@ -40,7 +40,7 @@ struct Args {
 
     /// Whether image rows should be normalized to have same dark levels.
     /// Relevant only when binning > 1.
-    #[arg(short, long, default_value_t = true)]
+    #[arg(short, long, default_value_t = false)]
     normalize_rows: std::primitive::bool,
 
     /// Whether image should be binned. 1 (no binning), 2, or 4.
