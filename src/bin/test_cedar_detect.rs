@@ -1,4 +1,4 @@
-// Copyright (c) 2023 Steven Rosenthal smr@dt3.org
+// Copyright (c) 2025 Steven Rosenthal smr@dt3.org
 // See LICENSE file in root directory for license terms.
 
 use std::fs;
@@ -7,8 +7,7 @@ use std::time::Instant;
 
 use clap::Parser;
 use env_logger;
-use image::io::Reader as ImageReader;
-use image::Rgb;
+use image::{ImageReader, Rgb};
 use imageproc::drawing;
 use imageproc::rect::Rect;
 use log::{info, warn};

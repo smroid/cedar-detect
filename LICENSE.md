@@ -1,6 +1,6 @@
 ## Notice
 
-Copyright 2023 Steven Rosenthal smr@dt3.org
+Copyright 2025 Steven Rosenthal smr@dt3.org
 
 All files in this directory (and subdirectories thereof) are subject
 to the license terms described in this file.
