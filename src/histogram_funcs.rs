@@ -3,6 +3,7 @@
 
 use std::cmp::{max, min};
 
+#[derive(Debug)]
 pub struct HistogramStats {
     pub mean: f64,
     pub median: usize,
