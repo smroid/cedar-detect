@@ -302,11 +302,11 @@ where u16: From<P>
             return (gate[3], ResultType::Uninteresting);
         }
     }
-    // Average of l+r (minus background) must exceed 0.25 * center (minus
+    // Average of l+r (minus background) must exceed 0.125 * center (minus
     // background).
     if detect_hot_pixels {
         let sum_neighbors_minus_background = l + r - est_background_2;
-        if 4 * sum_neighbors_minus_background <= center_minus_background_2 {
+        if 8 * sum_neighbors_minus_background <= center_minus_background_2 {
             // For ROI processing purposes, replace the hot pixel with its
             // neighbors' value.
             return (P::from((l + r) / 2).unwrap(), ResultType::HotPixel);
@@ -978,9 +978,9 @@ where i32: From<P>
         return None;
     }
     if detect_hot_pixels && core_width == 1 && core_height == 1 {
-        // Verify that the neighbor average (minus background) exceeds 0.25 *
+        // Verify that the neighbor average (minus background) exceeds 0.125 *
         // core (minus background).
-        if neighbor_mean - background_est <= 0.25 * (core_mean - background_est) {
+        if neighbor_mean - background_est <= 0.125 * (core_mean - background_est) {
             // Hot pixel.
             debug!("Neighbors too weak for blob {:?}", core);
             return None;
