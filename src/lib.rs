@@ -3,3 +3,4 @@
 
 pub mod algorithm;
 pub mod histogram_funcs;
+pub mod image_funcs;

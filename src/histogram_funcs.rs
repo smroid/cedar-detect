@@ -39,101 +39,40 @@ pub fn stats_for_histogram(histogram: &[u32]) -> HistogramStats {
     HistogramStats{mean, median, stddev}
 }
 
-/// Given a histogram of a row's u8 data, and the width of the row, return
-/// an estimate of the row's dark level (u8 range, as f32).
-pub fn estimate_row_dark_level(row_histogram: &[usize; 256], width: usize) -> f32 {
-    // Method: exclude the bottom 1% of values. Compute the mean of the next
-    // 1% of values.
-    let one_percent = width / 100;
+/// Given a histogram of u8 data, and the number of points, return an estimate
+/// of the data's dark level (u8 range, as f32).
+pub fn estimate_dark_level(pixel_histogram: &[u32], npoints: usize) -> f32 {
+    // Method: take the mean value of the bottom 1% of points.
+    let one_percent = (npoints / 100) as u32;
     if one_percent == 0 {
         // Too little data; just return the lowest non-zero bin.
-        for h in 0..row_histogram.len() {
-            if row_histogram[h] > 0 {
+        for h in 0..pixel_histogram.len() {
+            if pixel_histogram[h] > 0 {
                 return h as f32;
             }
         }
     }
-    // Skip first 'one_percent' of non-zero values.
-    let mut skip_count = one_percent;
-    let mut cur_bin = 0;
-    let mut count_remaining = 0_usize;
-    for h in 0..row_histogram.len() {
-        let bin_count = row_histogram[h];
+
+    // `accum` is first moment of first one_percent of points.
+    let mut accum = 0;
+    let mut accum_remaining = one_percent;
+
+    for h in 0..pixel_histogram.len() {
+        let bin_count = pixel_histogram[h];
         if bin_count == 0 {
             continue;
         }
-        if bin_count < skip_count {
-            skip_count -= bin_count;
+        if bin_count < accum_remaining {
+            accum += h as u32 * bin_count;
+            accum_remaining -= bin_count;
             continue;
         }
-        cur_bin = h;
-        count_remaining = bin_count - skip_count;
-        break;
-    }
-    // We've skipped the first 'one_percent'. Start accumulating
-    // the next 'one_percent'.
-    if count_remaining >= one_percent {
-        return cur_bin as f32;
-    }
-    let mut accum = cur_bin * count_remaining;
-    cur_bin += 1;
-    let mut accum_count = one_percent - count_remaining;
-
-    for h in cur_bin..row_histogram.len() {
-        let bin_count = row_histogram[h];
-        if bin_count < accum_count {
-            accum += h * bin_count;
-            accum_count -= bin_count;
-            continue;
-        }
-        accum += h * accum_count;
+        accum += h as u32 * accum_remaining;
         break;
     }
 
+    // Compute mean from first moment.
     accum as f32 / one_percent as f32
-}
-
-/// Shift the histogram bins by the indicated amount.
-pub fn shift_histogram(histogram: &mut[usize], shift: i32) {
-    let num_bins = histogram.len();
-    if num_bins <= 1 {
-        return;
-    }
-    if shift > 0 {
-        let shift = min(shift as usize, num_bins-1);
-        // Move histogram bins to the right. At the top of the histogram,
-        // accumulate incoming bin values. At the bottom of the histogram,
-        // zero the vacated bins.
-        let top_bin = num_bins - 1;
-        for i in 1..=shift {
-            histogram[top_bin] += histogram[top_bin - i];
-        }
-        let mut bin = top_bin - 1;
-        while bin >= shift {
-            histogram[bin] = histogram[bin - shift];
-            bin -= 1;
-        }
-        for i in 0..shift {
-            histogram[i] = 0;
-        }
-    }
-    if shift < 0 {
-        let shift = min(-shift as usize, num_bins-1);
-        // Move histogram bins to the left. At the bottom of the histogram,
-        // accumulate incoming bin values. At the top of the histogram,
-        // zero the vacated bins.
-        for i in 1..=shift {
-            histogram[0] += histogram[i];
-        }
-        let mut bin = 1;
-        while bin < num_bins - shift {
-            histogram[bin] = histogram[bin + shift];
-            bin += 1;
-        }
-        for i in 1..=shift {
-            histogram[num_bins - i] = 0;
-        }
-    }
 }
 
 /// Return the histogram bin number N such that the total number of bin entries
@@ -223,8 +162,7 @@ fn trim_histogram(histogram: &mut [u32], count_to_keep: u32) {
 
 #[cfg(test)]
 mod tests {
-    use crate::histogram_funcs::{estimate_row_dark_level, shift_histogram,
-                                 stats_for_histogram};
+    use crate::histogram_funcs::{estimate_dark_level, stats_for_histogram};
 
     #[test]
     fn test_stats_for_histogram() {
@@ -238,116 +176,23 @@ mod tests {
     }
 
     #[test]
-    fn test_estimate_row_dark_level_small_width() {
-        let mut row_histogram = [0_usize; 256];
+    fn test_estimate_dark_level_small_width() {
+        let mut row_histogram = [0_u32; 256];
 
         // Width is small, so 1% count underflows.
         row_histogram[2] = 1;
         row_histogram[3] = 9;
-        assert_eq!(estimate_row_dark_level(&row_histogram, 10), 2.0);
+        assert_eq!(estimate_dark_level(&row_histogram, 10), 2.0);
     }
 
     #[test]
-    fn test_estimate_row_dark_level_same_bin_after_skip() {
-        let mut row_histogram = [0_usize; 256];
+    fn test_estimate_dark_level() {
+        let mut row_histogram = [0_u32; 256];
 
-        row_histogram[2] = 5;  // Skipped.
-        row_histogram[4] = 15;  // First 5 skipped.
+        // 1% is 10 values, first 5 from bin 2 and second 5 from bin 4.
+        row_histogram[2] = 5;
+        row_histogram[4] = 15;
         row_histogram[10] = 980;
-        assert_eq!(estimate_row_dark_level(&row_histogram, 1000), 4.0);
+        assert_eq!(estimate_dark_level(&row_histogram, 1000), 3.0);
     }
-
-    #[test]
-    fn test_estimate_row_dark_level_next_bins_after_skip() {
-        let mut row_histogram = [0_usize; 256];
-
-        row_histogram[2] = 5;  // Skipped.
-        row_histogram[4] = 5;  // Skipped.
-        row_histogram[6] = 5;
-        row_histogram[8] = 985;
-        assert_eq!(estimate_row_dark_level(&row_histogram, 1000), 7.0);
-    }
-
-    #[test]
-    fn test_shift_single_bin_histogram() {
-        let mut histogram = [1];
-        shift_histogram(&mut histogram, 0);
-        assert_eq!(histogram[0], 1);
-        shift_histogram(&mut histogram, 1);
-        assert_eq!(histogram[0], 1);
-        shift_histogram(&mut histogram, 2);
-        assert_eq!(histogram[0], 1);
-        shift_histogram(&mut histogram, -1);
-        assert_eq!(histogram[0], 1);
-        shift_histogram(&mut histogram, -2);
-        assert_eq!(histogram[0], 1);
-    }
-
-    #[test]
-    fn test_shift_histogram() {
-        // Shift right by varying amounts.
-        let mut histogram = [1, 2, 3, 4];
-        shift_histogram(&mut histogram, 0);
-        assert_eq!(histogram[0], 1);
-        assert_eq!(histogram[1], 2);
-        assert_eq!(histogram[2], 3);
-        assert_eq!(histogram[3], 4);
-
-        shift_histogram(&mut histogram, 1);
-        assert_eq!(histogram[0], 0);
-        assert_eq!(histogram[1], 1);
-        assert_eq!(histogram[2], 2);
-        assert_eq!(histogram[3], 7);
-
-        histogram = [1, 2, 3, 4];
-        shift_histogram(&mut histogram, 2);
-        assert_eq!(histogram[0], 0);
-        assert_eq!(histogram[1], 0);
-        assert_eq!(histogram[2], 1);
-        assert_eq!(histogram[3], 9);
-
-        histogram = [1, 2, 3, 4];
-        shift_histogram(&mut histogram, 3);
-        assert_eq!(histogram[0], 0);
-        assert_eq!(histogram[1], 0);
-        assert_eq!(histogram[2], 0);
-        assert_eq!(histogram[3], 10);
-
-        histogram = [1, 2, 3, 4];
-        shift_histogram(&mut histogram, 4);
-        assert_eq!(histogram[0], 0);
-        assert_eq!(histogram[1], 0);
-        assert_eq!(histogram[2], 0);
-        assert_eq!(histogram[3], 10);
-
-        // Shift left by varying amounts.
-        histogram = [1, 2, 3, 4];
-        shift_histogram(&mut histogram, -1);
-        assert_eq!(histogram[0], 3);
-        assert_eq!(histogram[1], 3);
-        assert_eq!(histogram[2], 4);
-        assert_eq!(histogram[3], 0);
-
-        histogram = [1, 2, 3, 4];
-        shift_histogram(&mut histogram, -2);
-        assert_eq!(histogram[0], 6);
-        assert_eq!(histogram[1], 4);
-        assert_eq!(histogram[2], 0);
-        assert_eq!(histogram[3], 0);
-
-        histogram = [1, 2, 3, 4];
-        shift_histogram(&mut histogram, -3);
-        assert_eq!(histogram[0], 10);
-        assert_eq!(histogram[1], 0);
-        assert_eq!(histogram[2], 0);
-        assert_eq!(histogram[3], 0);
-
-        histogram = [1, 2, 3, 4];
-        shift_histogram(&mut histogram, -4);
-        assert_eq!(histogram[0], 10);
-        assert_eq!(histogram[1], 0);
-        assert_eq!(histogram[2], 0);
-        assert_eq!(histogram[3], 0);
-    }
-
 }  // mod tests.
