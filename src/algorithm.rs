@@ -307,18 +307,18 @@ fn is_hot_pixel(gate: &[u8], sigma_noise_2: i16, sigma_noise_3: i16) -> (bool, u
 
     let lb = gate[0] as i16;
     let rb = gate[6] as i16;
-    let est_background = (lb + rb) / 2;
+    let est_background_2 = lb + rb;
 
     let l = gate[2] as i16;
     let r = gate[4] as i16;
-    let max_neighbor = l.max(r);
+    let neighbor_sum = l + r;
 
-    // Either l or r (minus background) must exceed 0.125 * center (minus
+    // Sum of l + r (minus background) must exceed 0.125 * center (minus
     // background). Otherwise, the center is a hot pixel.
-    let center_minus_background = c - est_background;
-    let max_neighbor_minus_background = max_neighbor - est_background;
-    if 8 * max_neighbor_minus_background <= center_minus_background {
-        return (true, ((l + r) / 2) as u8);  // Hot pixel
+    let center_minus_background = c - est_background_2 / 2;
+    let neighbor_sum_minus_background = neighbor_sum - est_background_2;
+    if 8 * neighbor_sum_minus_background <= center_minus_background {
+        return (true, (neighbor_sum / 2) as u8);  // Hot pixel
     }
     return (false, c as u8)
 }
@@ -1207,13 +1207,7 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
         // Slide a 7 pixel gate across the row.
         let mut center_x = roi.left();
         for gate in row_pixels.windows(7) {
-            let result_type = gate_star_1d(gate, sigma_noise_2, sigma_noise_3);
-            let pixel_value;
-            if result_type == ResultType::Candidate {
-                (_, pixel_value) = is_hot_pixel(gate, sigma_noise_2, sigma_noise_3);
-            } else {
-                pixel_value = gate[3];
-            }
+            let (_, pixel_value) = is_hot_pixel(gate, sigma_noise_2, sigma_noise_3);
             cleaned_image.put_pixel(center_x as u32, rownum as u32,
                                     Luma::<u8>([pixel_value]));
             histogram[pixel_value as usize] += 1;
