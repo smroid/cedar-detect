@@ -295,32 +295,40 @@ struct CandidateFrom1D {
     y: i32,
 }
 
-// Returns true if the center of the 7-pixel gate is a hot pixel. In this case
+#[derive(Debug, Eq, PartialEq)]
+enum PixelHotType {
+    Dark,  // Pixel is not bright compared to threshold.
+    Bright,  // Pixel is bright compared to threshold but is not isolated (hot).
+    Hot,  // Pixel is bright compared to threshold and is isolated (hot).
+}
+
+// Returns Hot if the center of the 7-pixel gate is a hot pixel. In this case
 // the pixel value is replaced with the average of its neighbors.
 // Returns false if the center pixel is not a hot pixel. In this case the
 // original pixel value is returned.
-fn is_hot_pixel(gate: &[u8], sigma_noise_2: i16, sigma_noise_3: i16) -> (bool, u8) {
+fn classify_pixel(gate: &[u8], sigma_noise_2: i16) -> (PixelHotType, u8)
+{
+    let lb = gate[0] as i16;
     let c = gate[3] as i16;
-    if gate_star_1d(gate, sigma_noise_2, sigma_noise_3) == ResultType::Uninteresting {
-        return (false, c as u8)
+    let rb = gate[6] as i16;
+
+    // Hot pixel must be bright compared to background.
+    let est_background_2 = lb + rb;
+    let center_minus_background_2 = c + c - est_background_2;
+    if center_minus_background_2 < sigma_noise_2 {
+        return (PixelHotType::Dark, gate[3]);
     }
 
-    let lb = gate[0] as i16;
-    let rb = gate[6] as i16;
-    let est_background_2 = lb + rb;
-
+    // Sum of l + r (minus background) must exceed 0.25 * center (minus
+    // background). Otherwise, the center is a hot pixel.
     let l = gate[2] as i16;
     let r = gate[4] as i16;
     let neighbor_sum = l + r;
-
-    // Sum of l + r (minus background) must exceed 0.125 * center (minus
-    // background). Otherwise, the center is a hot pixel.
-    let center_minus_background = c - est_background_2 / 2;
     let neighbor_sum_minus_background = neighbor_sum - est_background_2;
-    if 8 * neighbor_sum_minus_background <= center_minus_background {
-        return (true, (neighbor_sum / 2) as u8);  // Hot pixel
+    if 4 * neighbor_sum_minus_background <= center_minus_background_2 / 2 {
+        return (PixelHotType::Hot, (neighbor_sum / 2) as u8);
     }
-    return (false, c as u8)
+    return (PixelHotType::Bright, c as u8)
 }
 
 // Applies gate_star_1d() at all pixel positions of the image (excluding the few
@@ -1010,14 +1018,13 @@ pub fn get_stars_from_image(image: &GrayImage,
             scan_image_for_candidates(image, noise_estimate, sigma,
                                       /*compute_histogram=*/true);
         let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate + 0.5) as i16, 2);
-        let sigma_noise_3 = cmp::max((3.0 * sigma * noise_estimate + 0.5) as i16, 3);
         let mut filtered_candidates = Vec::<CandidateFrom1D>::new();
         for cand in candidates_1d {
             if !detect_hot_pixels {
                 filtered_candidates.push(cand);
             } else {
-                if is_any_hot_pixel(&image, cand.x, cand.y, binning,
-                                    sigma_noise_2, sigma_noise_3)  {
+                if all_bright_are_hot(&image, cand.x, cand.y, binning,
+                                      sigma_noise_2)  {
                     hot_pixel_count += 1;
                 } else {
                     filtered_candidates.push(cand);
@@ -1056,7 +1063,6 @@ pub fn get_stars_from_image(image: &GrayImage,
     let detect_start = Instant::now();
 
     let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate_binned + 0.5) as i16, 2);
-    let sigma_noise_3 = cmp::max((3.0 * sigma * noise_estimate_binned + 0.5) as i16, 3);
 
     let (candidates_1d, _) =
         scan_image_for_candidates(&binned_image, noise_estimate_binned, sigma,
@@ -1066,8 +1072,8 @@ pub fn get_stars_from_image(image: &GrayImage,
         if !detect_hot_pixels {
             filtered_candidates.push(cand);
         } else {
-            if is_any_hot_pixel(&image, cand.x, cand.y, binning,
-                                sigma_noise_2, sigma_noise_3)  {
+            if all_bright_are_hot(&image, cand.x, cand.y, binning,
+                                  sigma_noise_2)  {
                 hot_pixel_count += 1;
             } else {
                 filtered_candidates.push(cand);
@@ -1091,12 +1097,11 @@ pub fn get_stars_from_image(image: &GrayImage,
     (stars, hot_pixel_count, Some(binned_image), histogram)
 }
 
-// Given a star candidate in a (possibly) binned image, see if any
-// of the pixel(s) in the full resolution image that contribute to the
-// star candidate are hot. If so, we deem the candidate to be spurious.
-fn is_any_hot_pixel(full_res_image: &GrayImage,
-                    x: i32, y: i32, binning: u32,
-                    sigma_noise_2: i16, sigma_noise_3: i16) -> bool {
+// Given a star candidate in a (possibly) binned image, see any pixel(s) in the
+// full resolution image contribute to the star candidate are non-hot bright.
+fn all_bright_are_hot(full_res_image: &GrayImage,
+                      x: i32, y: i32, binning: u32,
+                      sigma_noise_2: i16) -> bool {
     let width = full_res_image.dimensions().0 as i32;
     let image_pixels: &Vec<u8> = full_res_image.as_raw();
 
@@ -1118,13 +1123,14 @@ fn is_any_hot_pixel(full_res_image: &GrayImage,
             let start_x = backing_x - 3;
             let end_x = backing_x + 4;
             let gate = &row_pixels[start_x as usize .. end_x as usize];
-            let (is_hot, _) = is_hot_pixel(gate, sigma_noise_2, sigma_noise_3);
-            if is_hot {
-                return true;
+            let (pixel_type, _) = classify_pixel(gate, sigma_noise_2);
+            if pixel_type == PixelHotType::Bright {
+                return false;
             }
         }
     }
-    return false;
+    // All pixels are dark or hot.
+    return true;
 }
 
 /// Summarizes an image region of interest. The pixel values used are not
@@ -1197,7 +1203,6 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
     let mut cleaned_image = image.clone();
 
     let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate) as i16, 2);
-    let sigma_noise_3 = cmp::max((3.0 * sigma * noise_estimate) as i16, 3);
     for rownum in roi.top()..=roi.bottom() {
         // Get the slice of image_pixels corresponding to this row of the ROI.
         let row_start = (rownum * width as i32) as usize;
@@ -1207,7 +1212,7 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
         // Slide a 7 pixel gate across the row.
         let mut center_x = roi.left();
         for gate in row_pixels.windows(7) {
-            let (_, pixel_value) = is_hot_pixel(gate, sigma_noise_2, sigma_noise_3);
+            let (_, pixel_value) = classify_pixel(gate, sigma_noise_2);
             cleaned_image.put_pixel(center_x as u32, rownum as u32,
                                     Luma::<u8>([pixel_value]));
             histogram[pixel_value as usize] += 1;
