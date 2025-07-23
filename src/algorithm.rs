@@ -1099,8 +1099,9 @@ pub fn get_stars_from_image(image: &GrayImage,
     (stars, hot_pixel_count, Some(binned_image), histogram)
 }
 
-// Given a star candidate in a (possibly) binned image, see any pixel(s) in the
-// full resolution image contribute to the star candidate are non-hot bright.
+// Given a star candidate in a (possibly) binned image, see if any pixel(s) in
+// the full resolution image contribute to the star candidate are non-hot
+// bright.
 fn all_bright_are_hot(full_res_image: &GrayImage,
                       x: i32, y: i32, binning: u32,
                       sigma_noise_2: i16) -> bool {
@@ -1136,15 +1137,17 @@ fn all_bright_are_hot(full_res_image: &GrayImage,
 }
 
 /// Summarizes an image region of interest. The pixel values used are not
-/// background subtracted.
+/// background subtracted. Single hot pixels are replaced with interpolated
+/// neighbor values when locating the peak pixel and when accumulating the
+/// histogram.
 #[derive(Debug)]
 pub struct RegionOfInterestSummary {
     /// Histogram of pixel values in the ROI.
     pub histogram: [u32; 256],
 
     /// The location (in image coordinates) of the peak pixel. If there are
-    /// multiple pixels with the peak value, it is unspecified which one's
-    /// location is reported here. The application logic should use `histogram`
+    /// multiple pixels with the peak value, the one closest to the image
+    /// center is reported here. The application logic should use `histogram`
     /// to adjust exposure to avoid too many peak (saturated) pixels.
     pub peak_x: f64,
     pub peak_y: f64,
@@ -1155,6 +1158,11 @@ pub struct RegionOfInterestSummary {
 /// # Arguments
 ///   `image` - The image of which a portion will be summarized.
 ///   `roi` - Specifies the portion of `image` to be summarized.
+///   `noise_estimate` The noise level of `image`. This is typically the noise
+///       level returned by [estimate_noise_from_image()].
+///   `sigma` - Specifies the statistical significance threshold used for
+///       discriminating hot pixels from background. This can be the same value
+///       as passed to [get_stars_from_image()].
 ///
 /// # Returns
 /// [RegionOfInterestSummary] Information that compactly provides some information
@@ -1165,16 +1173,24 @@ pub struct RegionOfInterestSummary {
 /// # Panics
 /// The `roi` must exclude the three leftmost and three rightmost image columns.
 /// The `roi` must exclude the three top and three bottom image rows.
-pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect)
+pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
+                                    noise_estimate: f64, sigma: f64)
                                     -> RegionOfInterestSummary {
     let process_roi_start = Instant::now();
     let (width, height) = image.dimensions();
+    // Compute the ROI center, in image coordinates.
+    let (roi_center_x, roi_center_y) =
+        (roi.left() + roi.width() as i32 / 2,
+         roi.top() + roi.height() as i32 / 2);
+    let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate + 0.5) as i16, 2);
 
-    // We need left/right margin to allow centroiding.
-    let left: i32 = roi.left() as i32 - 3;
-    let right = roi.right() + 4;  // One past.
-    assert!(left >= 0);
-    assert!(right <= width as i32);
+    // Sliding gate needs to extend past left and right edges of ROI. Make sure
+    // there's enough image.
+    let gate_leftmost: i32 = roi.left() as i32 - 3;
+    let gate_rightmost = roi.right() + 4;  // One past.
+    assert!(gate_leftmost >= 0);
+    assert!(gate_rightmost <= width as i32);
+
     // We also need top/bottom margin to allow centroiding.
     let top: i32 = roi.top() as i32 - 3;
     let bottom = roi.bottom() + 4;  // One past.
@@ -1186,26 +1202,59 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect)
     let mut peak_x = 0;
     let mut peak_y = 0;
     let mut peak_val = 0_u8;
+    let mut peak_center_dist_sq = i32::MAX;
     for rownum in roi.top()..=roi.bottom() {
         // Get the slice of image_pixels corresponding to this row of the ROI.
         let row_start = (rownum * width as i32) as usize;
-        let row_pixels: &[u8] = &image_pixels.as_slice()
+        let gate_pixels: &[u8] = &image_pixels.as_slice()
+            [row_start + gate_leftmost as usize ..
+             row_start + gate_rightmost as usize];
+        let roi_pixels: &[u8] = &image_pixels.as_slice()
             [row_start + roi.left() as usize ..=
              row_start + roi.right() as usize];
         let mut x = roi.left();
-        for pixel_value in row_pixels {
-            histogram[*pixel_value as usize] += 1;
-            if *pixel_value >= peak_val {
-                peak_x = x;
-                peak_y = rownum;
-                peak_val = *pixel_value;
-            }
+        let mut val;
+        for pixel_value in roi_pixels {
+            val = *pixel_value;
+            if val >= peak_val {
+                // See if this is a hot pixel.
+                let start_x = x - 3;
+                let end_x = x + 4;
+                let gate = &gate_pixels[start_x as usize .. end_x as usize];
+                let (pixel_type, subst_val) = classify_pixel(gate, sigma_noise_2);
+                if pixel_type == PixelHotType::Hot {
+                    // Hot pixel can't be peak. Substitute its value for the
+                    // histogram.
+                    val = subst_val;
+                } else {
+                    let center_dist_sq =
+                        (x - roi_center_x) * (x - roi_center_x) +
+                        (rownum - roi_center_y) * (rownum - roi_center_y);
+
+                    let mut new_peak = false;
+                    if val == peak_val {
+                        // Break ties towards image center.
+                        if center_dist_sq < peak_center_dist_sq {
+                            new_peak = true;
+                        }
+                    } else {
+                        new_peak = true;
+                    }
+                    if new_peak {
+                        peak_x = x;
+                        peak_y = rownum;
+                        peak_val = val;
+                        peak_center_dist_sq = center_dist_sq;
+                    }
+                }
+            }  // Candidate peak.
+            histogram[val as usize] += 1;
             x += 1;
         }
     }
 
     // Apply centroiding to get sub-pixel resolution for peak_x/y.
-    let bounding_box = Rect::at(peak_x - 3, peak_y - 3).of_size(7, 7);
+    let bounding_box = Rect::at(peak_x - 2, peak_y - 2).of_size(5, 5);
     let (mut x, mut y) = compute_peak_coord(&image, &bounding_box);
     x += 0.5;
     y += 0.5;
@@ -1828,7 +1877,8 @@ mod tests {
             9,  9,  9,  9,  9,  9,  9,  9,  9;
             9,  9,  9,  9,  9,  9,  9,  9,  9);
         // Cannot give ROI too close to left edges.
-        let _roi_summary = summarize_region_of_interest(&image_9x9, &roi);
+        let _roi_summary = summarize_region_of_interest(
+            &image_9x9, &roi, 1.0, 5.0);
     }
 
     #[test]
@@ -1845,14 +1895,15 @@ mod tests {
             9,  9,  9,  9,  9,  9,  9,  9,  9;
             9,  9,  9,  9,  9,  9,  9,  9,  9);
         // Cannot give ROI too close to right edges.
-        let _roi_summary = summarize_region_of_interest(&image_9x9, &roi);
+        let _roi_summary = summarize_region_of_interest(
+            &image_9x9, &roi, 1.0, 5.0);
     }
 
     #[test]
     fn test_summarize_region_of_interest_good_edges() {
         let roi = Rect::at(3, 3).of_size(3, 2);
-        // 80 is a hot pixel, but is not replaced by
-        // summarize_region_of_interest().
+        // 80 is a hot pixel, is replaced by interpolation of its left
+        // and right neighbors.
         let image_9x9 = gray_image!(
             9,  9,  9,  9,  9,  9,  9,  9,  9;
             9,  9,  9,  9,  9,  9,  9,  9,  9;
@@ -1863,13 +1914,16 @@ mod tests {
             9,  9,  9,  9,  9,  9,  9,  9,  9;
             9,  9,  9,  9,  9,  9,  9,  9,  9);
         // ROI is correct distance from left+right edges.
-        let roi_summary = summarize_region_of_interest(&image_9x9, &roi);
+        let roi_summary = summarize_region_of_interest(
+            &image_9x9, &roi, 1.0, 5.0);
         assert_eq!(roi_summary.histogram[7], 1);
+        assert_eq!(roi_summary.histogram[8], 1);
         assert_eq!(roi_summary.histogram[9], 1);
         assert_eq!(roi_summary.histogram[11], 1);
         assert_eq!(roi_summary.histogram[20], 1);
         assert_eq!(roi_summary.histogram[32], 1);
-        assert_eq!(roi_summary.histogram[80], 1);
+        // The hot pixel is not the peak, but it can influence
+        // the centroided position of the peak.
         assert_abs_diff_eq!(roi_summary.peak_x,
                             4.5, epsilon = 0.1);
         assert_abs_diff_eq!(roi_summary.peak_y,
@@ -1888,7 +1942,8 @@ mod tests {
             9,  9,  9,  9,  9,  9,  9,  9,  9;
             9,  9,  9,  9,  9,  9,  9,  9,  9;
             9,  9,  9,  9,  9,  9,  9,  9,  9);
-        let roi_summary = summarize_region_of_interest(&image_9x9, &roi);
+        let roi_summary = summarize_region_of_interest(
+            &image_9x9, &roi, 1.0, 5.0);
         assert_abs_diff_eq!(roi_summary.peak_x,
                             3.0, epsilon = 0.01);
         assert_abs_diff_eq!(roi_summary.peak_y,
@@ -1907,11 +1962,35 @@ mod tests {
             9,  9,  9,  9, 50, 60, 80,  9,  9;
             9,  9,  9,  9, 59, 69, 89,  9,  9;
             9,  9,  9,  9,  9,  9,  9,  9,  9);
-        let roi_summary = summarize_region_of_interest(&image_9x9, &roi);
+        let roi_summary = summarize_region_of_interest(
+            &image_9x9, &roi, 1.0, 5.0);
         assert_abs_diff_eq!(roi_summary.peak_x,
                             5.0, epsilon = 0.01);
         assert_abs_diff_eq!(roi_summary.peak_y,
                             4.0, epsilon = 0.01);
+    }
+
+    #[test]
+    fn test_summarize_region_of_interest_peak_tiebreak_to_center() {
+        let roi = Rect::at(3, 3).of_size(5, 5);
+        let image_11x11 = gray_image!(
+            9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9, 11,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9, 11,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9, 11,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9);
+        let roi_summary = summarize_region_of_interest(
+            &image_11x11, &roi, 1.0, 5.0);
+        assert_abs_diff_eq!(roi_summary.peak_x,
+                            5.5, epsilon = 0.01);
+        assert_abs_diff_eq!(roi_summary.peak_y,
+                            5.5, epsilon = 0.01);
     }
 
 }  // mod tests.
