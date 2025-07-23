@@ -1151,6 +1151,10 @@ pub struct RegionOfInterestSummary {
     /// to adjust exposure to avoid too many peak (saturated) pixels.
     pub peak_x: f64,
     pub peak_y: f64,
+
+    /// Mean of the pixel values in a 3x3 pixel square centered on the peak
+    /// pixel. Not dark subtracted.
+    pub peak_value: f64,  // 0..255.
 }
 
 /// Gathers information from a region of interest of an image.
@@ -1263,8 +1267,19 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
     x = cmp::min_by(x, roi.right() as f64, |a,b| a.partial_cmp(b).unwrap());
     y = cmp::max_by(y, roi.top() as f64, |a,b| a.partial_cmp(b).unwrap());
     y = cmp::min_by(y, roi.bottom() as f64, |a,b| a.partial_cmp(b).unwrap());
+
+    let value_box = Rect::at(peak_x - 1, peak_y - 1).of_size(3, 3);
+    let mut box_sum: i32 = 0;
+    let mut box_count: i32 = 0;
+    for (_x, _y, pixel_value) in EnumeratePixels::new(
+        &image, &value_box, /*include_interior=*/true) {
+        box_sum += pixel_value as i32;
+        box_count += 1;
+    }
+    let peak_value = box_sum as f64 / box_count as f64;
+
     debug!("ROI processing completed in {:?}", process_roi_start.elapsed());
-    RegionOfInterestSummary{histogram, peak_x: x, peak_y: y}
+    RegionOfInterestSummary{histogram, peak_x: x, peak_y: y, peak_value}
 }
 
 #[cfg(test)]
@@ -1923,11 +1938,13 @@ mod tests {
         assert_eq!(roi_summary.histogram[20], 1);
         assert_eq!(roi_summary.histogram[32], 1);
         // The hot pixel is not the peak, but it can influence
-        // the centroided position of the peak.
+        // the centroided position of the peak and the peak_value.
         assert_abs_diff_eq!(roi_summary.peak_x,
                             4.5, epsilon = 0.1);
         assert_abs_diff_eq!(roi_summary.peak_y,
                             3.7, epsilon = 0.1);
+        assert_abs_diff_eq!(roi_summary.peak_value,
+                            20.8, epsilon = 0.1);
     }
 
     #[test]
