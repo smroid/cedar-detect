@@ -1190,14 +1190,14 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
 
     // Sliding gate needs to extend past left and right edges of ROI. Make sure
     // there's enough image.
-    let gate_leftmost: i32 = roi.left() as i32 - 3;
-    let gate_rightmost = roi.right() + 4;  // One past.
+    let gate_leftmost = roi.left() as i32 - 3;
+    let gate_rightmost = roi.right() as i32 + 4;  // One past.
     assert!(gate_leftmost >= 0);
     assert!(gate_rightmost <= width as i32);
 
     // We also need top/bottom margin to allow centroiding.
-    let top: i32 = roi.top() as i32 - 3;
-    let bottom = roi.bottom() + 4;  // One past.
+    let top = roi.top() as i32 - 3;
+    let bottom = roi.bottom() as i32 + 4;  // One past.
     assert!(top >= 0);
     assert!(bottom <= height as i32);
     let image_pixels: &Vec<u8> = image.as_raw();
@@ -1210,29 +1210,21 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
     for rownum in roi.top()..=roi.bottom() {
         // Get the slice of image_pixels corresponding to this row of the ROI.
         let row_start = (rownum * width as i32) as usize;
-        let gate_pixels: &[u8] = &image_pixels.as_slice()
+        let row_pixels: &[u8] = &image_pixels.as_slice()
             [row_start + gate_leftmost as usize ..
              row_start + gate_rightmost as usize];
-        let roi_pixels: &[u8] = &image_pixels.as_slice()
-            [row_start + roi.left() as usize ..=
-             row_start + roi.right() as usize];
-        let mut x = roi.left();
-        let mut val;
-        for pixel_value in roi_pixels {
-            val = *pixel_value;
+        // Slide a 7 pixel gate across the row.
+        let mut center_x = roi.left();
+        for gate in row_pixels.windows(7) {
+            let (pixel_type, val) = classify_pixel(gate, sigma_noise_2);
             if val >= peak_val {
                 // See if this is a hot pixel.
-                let start_x = x - 3;
-                let end_x = x + 4;
-                let gate = &gate_pixels[start_x as usize .. end_x as usize];
-                let (pixel_type, subst_val) = classify_pixel(gate, sigma_noise_2);
                 if pixel_type == PixelHotType::Hot {
                     // Hot pixel can't be peak. Substitute its value for the
                     // histogram.
-                    val = subst_val;
                 } else {
                     let center_dist_sq =
-                        (x - roi_center_x) * (x - roi_center_x) +
+                        (center_x - roi_center_x) * (center_x - roi_center_x) +
                         (rownum - roi_center_y) * (rownum - roi_center_y);
 
                     let mut new_peak = false;
@@ -1245,7 +1237,7 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
                         new_peak = true;
                     }
                     if new_peak {
-                        peak_x = x;
+                        peak_x = center_x;
                         peak_y = rownum;
                         peak_val = val;
                         peak_center_dist_sq = center_dist_sq;
@@ -1253,7 +1245,7 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
                 }
             }  // Candidate peak.
             histogram[val as usize] += 1;
-            x += 1;
+            center_x += 1;
         }
     }
 
@@ -1923,7 +1915,7 @@ mod tests {
             9,  9,  9,  9,  9,  9,  9,  9,  9;
             9,  9,  9,  9,  9,  9,  9,  9,  9;
             9,  9,  9,  9,  9,  9,  9,  9,  9;
-            9,  9,  9,  7,  80,  9, 9,  9,  9;
+            9,  9,  9,  7,  80, 9,  9,  9,  9;
             9,  9,  9,  11, 20, 32, 10, 9,  9;
             9,  9,  9,  9,  9,  9,  9,  9,  9;
             9,  9,  9,  9,  9,  9,  9,  9,  9;
