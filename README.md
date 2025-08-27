@@ -30,6 +30,14 @@ For more information, see the crate documentation in src/algorithm.rs.
 See the sample program at src/bin/test_cedar_detect.rs for example usages of
 CedarDetect called directly from Rust program logic.
 
+### Building on Mac
+
+Installing the protobuf prerequisite:
+
+```shell
+brew install protobuf
+```
+
 ## Python
 
 There is (currently) no option to link CedarDetect with Python. Instead, a
