@@ -93,8 +93,7 @@ pub fn get_level_for_fraction(histogram: &[u32], fraction: f64) -> usize {
             return h;
         }
     }
-    assert!(false);  // Should not get here.
-    return 0;
+    unreachable!()  // Should not get here.
 }
 
 /// Return the average of the N highest histogram entry values.

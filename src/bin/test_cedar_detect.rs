@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use clap::Parser;
-use env_logger;
 use image::{ImageReader, Rgb};
 use imageproc::drawing;
 use imageproc::rect::Rect;

@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use clap::Parser;
-use env_logger;
 use image::{GrayImage};
 use imageproc::rect::Rect;
 use libc::{c_int, c_void, close, mmap, munmap, shm_open,
@@ -202,7 +201,7 @@ impl CedarDetect for MyCedarDetect {
         let response = cedar_detect::CentroidsResult{
             noise_estimate,
             background_estimate,
-            hot_pixel_count: hot_pixel_count as i32,
+            hot_pixel_count,
             peak_star_pixel: if num_peak > 0 { sum_peak / num_peak } else { 255 },
             star_candidates: candidates,
             binned_image: if binned_image.is_some() {

@@ -286,7 +286,7 @@ fn gate_star_1d(gate: &[u8], sigma_noise_2: i16, sigma_noise_3: i16)
     }
     // We have a candidate star from our 1d analysis!
     debug!("candidate: {:?}", gate);
-    return ResultType::Candidate;
+    ResultType::Candidate
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -330,7 +330,7 @@ fn classify_pixel(gate: &[u8], sigma_noise_2: i16) -> (PixelHotType, u8)
     if 4 * neighbor_sum_minus_background <= center_minus_background_2 / 2 {
         return (PixelHotType::Hot, (neighbor_sum / 2) as u8);
     }
-    return (PixelHotType::Bright, c as u8)
+    (PixelHotType::Bright, c as u8)
 }
 
 // Applies gate_star_1d() at all pixel positions of the image (excluding the few
@@ -447,18 +447,16 @@ fn form_blobs_from_candidates(candidates: Vec<CandidateFrom1D>)
     let mut labeled_candidates_by_row = Vec::<Vec<LabeledCandidate>>::new();
 
     let mut blobs: HashMap<i32, Blob> = HashMap::new();
-    let mut next_blob_id = 0;
     // Create an initial singular blob for each candidate.
-    for candidate in candidates {
-        blobs.insert(next_blob_id, Blob{candidates: vec![candidate],
+    for (next_blob_id, candidate) in candidates.into_iter().enumerate() {
+        blobs.insert(next_blob_id as i32, Blob{candidates: vec![candidate],
                                         recipient_blob: -1});
         if candidate.y as usize >= labeled_candidates_by_row.len() {
             labeled_candidates_by_row.resize(candidate.y as usize + 1,
                                              Vec::<LabeledCandidate>::new());
         }
         labeled_candidates_by_row[candidate.y as usize].push(
-            LabeledCandidate{candidate, blob_id: next_blob_id});
-        next_blob_id += 1;
+            LabeledCandidate{candidate, blob_id: next_blob_id as i32});
     }
     // Merge adjacent blobs. Within a row blobs are not adjacent (by the nature of
     // how row scanning identifies candidates), so we just need to look for vertical
@@ -637,7 +635,7 @@ fn gate_star_2d(
     let mut core_sum: i32 = 0;
     let mut core_count: i32 = 0;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
-        &image, &core, /*include_interior=*/true) {
+        image, &core, /*include_interior=*/true) {
         core_sum += i32::from(pixel_value);
         core_count += 1;
     }
@@ -653,7 +651,7 @@ fn gate_star_2d(
         let mut outer_core_sum: i32 = 0;
         let mut outer_core_count: i32 = 0;
         for (_x, _y, pixel_value) in EnumeratePixels::new(
-            &image, &core, /*include_interior=*/false) {
+            image, &core, /*include_interior=*/false) {
             outer_core_sum += i32::from(pixel_value);
             outer_core_count += 1;
         }
@@ -671,7 +669,7 @@ fn gate_star_2d(
     let mut neighbor_sum: i32 = 0;
     let mut neighbor_count: i32 = 0;
     for (x, y, pixel_value) in EnumeratePixels::new(
-        &image, &neighbors, /*include_interior=*/false) {
+        image, &neighbors, /*include_interior=*/false) {
         let is_corner =
             (x == neighbors.left() || x == neighbors.right()) &&
             (y == neighbors.top() || y == neighbors.bottom());
@@ -694,7 +692,7 @@ fn gate_star_2d(
     let mut margin_sum: i32 = 0;
     let mut margin_count: i32 = 0;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
-        &image, &margin, /*include_interior=*/false) {
+        image, &margin, /*include_interior=*/false) {
         margin_sum += i32::from(pixel_value);
         margin_count += 1;
     }
@@ -713,7 +711,7 @@ fn gate_star_2d(
                                             perimeter.top() as u32).0[0];
     let mut perimeter_max = perimeter_min;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
-        &image, &perimeter, /*include_interior=*/false) {
+        image, &perimeter, /*include_interior=*/false) {
         perimeter_sum += i32::from(pixel_value);
         perimeter_count += 1;
         if pixel_value < perimeter_min {
@@ -730,7 +728,7 @@ fn gate_star_2d(
     // high, suppressing spurious "star" detections.
     let mut perimeter_dev_2: f64 = 0.0;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
-        &image, &perimeter, /*include_interior=*/false) {
+        image, &perimeter, /*include_interior=*/false) {
         let res = i32::from(pixel_value) as f64 - background_est;
         perimeter_dev_2 += res * res;
     }
@@ -796,7 +794,7 @@ fn compute_brightness(image: &GrayImage, bounding_box: &Rect) -> (f64, u16, u8) 
     let mut boundary_sum: i32 = 0;
     let mut boundary_count: i32 = 0;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
-        &image, &bounding_box, /*include_interior=*/false) {
+        image, bounding_box, /*include_interior=*/false) {
         boundary_sum += pixel_value as i32;
         boundary_count += 1;
     }
@@ -809,7 +807,7 @@ fn compute_brightness(image: &GrayImage, bounding_box: &Rect) -> (f64, u16, u8) 
     let mut sum = 0.0;
     let mut peak_value: u8 = 0;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
-        &image, &inset, /*include_interior=*/true) {
+        image, &inset, /*include_interior=*/true) {
         if pixel_value == 255_u8 {
             num_saturated += 1;
         }
@@ -828,7 +826,7 @@ fn compute_peak_coord(image: &GrayImage, bounding_box: &Rect) -> (f64, f64) {
     let x0 = bounding_box.left();
     let y0 = bounding_box.top();
     for (x, y, pixel_value) in EnumeratePixels::new(
-        &image, &bounding_box, /*include_interior=*/true) {
+        image, bounding_box, /*include_interior=*/true) {
         horizontal_projection[(x - x0) as usize] += pixel_value as u32;
         vertical_projection[(y - y0) as usize] += pixel_value as u32;
     }
@@ -898,14 +896,15 @@ pub fn estimate_noise_from_image(image: &GrayImage) -> f64 {
     // variations.
     let cut_size = cmp::min(50, width / 4);
 
-    let mut stats_vec = Vec::<HistogramStats>::new();
     // Sample three areas across the horizontal midline of the image.
-    stats_vec.push(stats_for_roi(image, &Rect::at(
-        (width*1/4 - cut_size/2) as i32, (height/2) as i32).of_size(cut_size, 1)));
-    stats_vec.push(stats_for_roi(image, &Rect::at(
-        (width*2/4 - cut_size/2) as i32, (height/2) as i32).of_size(cut_size, 1)));
-    stats_vec.push(stats_for_roi(image, &Rect::at(
-        (width*3/4 - cut_size/2) as i32, (height/2) as i32).of_size(cut_size, 1)));
+    let mut stats_vec = vec![
+        stats_for_roi(image, &Rect::at(
+            (width/4 - cut_size/2) as i32, (height/2) as i32).of_size(cut_size, 1)),
+        stats_for_roi(image, &Rect::at(
+            (width*2/4 - cut_size/2) as i32, (height/2) as i32).of_size(cut_size, 1)),
+        stats_for_roi(image, &Rect::at(
+            (width*3/4 - cut_size/2) as i32, (height/2) as i32).of_size(cut_size, 1))
+    ];
     // Pick the darkest cut by mean value.
     stats_vec.sort_by(|a, b| a.mean.partial_cmp(&b.mean).unwrap());
     let stddev = stats_vec[0].stddev;
@@ -916,7 +915,7 @@ pub fn estimate_noise_from_image(image: &GrayImage) -> f64 {
 /// Estimates the background and noise level of the given image region.
 pub fn estimate_background_from_image_region(image: &GrayImage, roi: &Rect)
                                              -> (f64, f64) {
-    let stats = stats_for_roi(&image, &roi);
+    let stats = stats_for_roi(image, roi);
     (stats.mean, stats.stddev)
 }
 
@@ -926,7 +925,7 @@ pub fn estimate_background_from_image_region(image: &GrayImage, roi: &Rect)
 fn stats_for_roi(image: &GrayImage, roi: &Rect) -> HistogramStats {
     let mut histogram = [0_u32; 256];
     for (_x, _y, pixel_value) in EnumeratePixels::new(
-        &image, &roi, /*include_interior=*/true) {
+        image, roi, /*include_interior=*/true) {
         histogram[pixel_value as usize] += 1;
     }
     remove_stars_from_histogram(&mut histogram, /*sigma=*/8.0);
@@ -1024,23 +1023,18 @@ pub fn get_stars_from_image(image: &GrayImage,
         for cand in candidates_1d {
             if !detect_hot_pixels {
                 filtered_candidates.push(cand);
+            } else if all_bright_are_hot(image, cand.x, cand.y, binning,
+                                  sigma_noise_2)  {
+                hot_pixel_count += 1;
             } else {
-                if all_bright_are_hot(&image, cand.x, cand.y, binning,
-                                      sigma_noise_2)  {
-                    hot_pixel_count += 1;
-                } else {
-                    filtered_candidates.push(cand);
-                }
+                filtered_candidates.push(cand);
             }
         }
         for blob in form_blobs_from_candidates(filtered_candidates) {
-            match gate_star_2d(&blob, image,
+            if let Some(x) = gate_star_2d(&blob, image,
                                /*full_res_image=*/image,
                                binning, noise_estimate, sigma,
-                               max_size, max_size) {
-                Some(x) => stars.push(x),
-                None => ()
-            }
+                               max_size, max_size) { stars.push(x) }
         }
 
         // Sort by brightness estimate, brightest first.
@@ -1051,7 +1045,7 @@ pub fn get_stars_from_image(image: &GrayImage,
     }
 
     // We are binning by 2x or 4x.
-    let mut binned_images = bin_and_histogram_2x2(&image, normalize_rows);
+    let mut binned_images = bin_and_histogram_2x2(image, normalize_rows);
     let mut binned_image = binned_images.binned;
     let mut histogram = binned_images.histogram;
     if binning == 4 {
@@ -1073,23 +1067,18 @@ pub fn get_stars_from_image(image: &GrayImage,
     for cand in candidates_1d {
         if !detect_hot_pixels {
             filtered_candidates.push(cand);
+        } else if all_bright_are_hot(image, cand.x, cand.y, binning,
+                              sigma_noise_2)  {
+            hot_pixel_count += 1;
         } else {
-            if all_bright_are_hot(&image, cand.x, cand.y, binning,
-                                  sigma_noise_2)  {
-                hot_pixel_count += 1;
-            } else {
-                filtered_candidates.push(cand);
-            }
+            filtered_candidates.push(cand);
         }
     }
     for blob in form_blobs_from_candidates(filtered_candidates) {
-        match gate_star_2d(&blob, &binned_image,
+        if let Some(x) = gate_star_2d(&blob, &binned_image,
                            /*full_res_image=*/image,
                            binning, noise_estimate_binned, sigma,
-                           max_size/binning + 1, max_size/binning + 1) {
-            Some(x) => stars.push(x),
-            None => ()
-        }
+                           max_size/binning + 1, max_size/binning + 1) { stars.push(x) }
     }
 
     // Sort by brightness estimate, brightest first.
@@ -1133,7 +1122,7 @@ fn all_bright_are_hot(full_res_image: &GrayImage,
         }
     }
     // All pixels are dark or hot.
-    return true;
+    true
 }
 
 /// Summarizes an image region of interest. The pixel values used are not
@@ -1190,14 +1179,14 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
 
     // Sliding gate needs to extend past left and right edges of ROI. Make sure
     // there's enough image.
-    let gate_leftmost = roi.left() as i32 - 3;
-    let gate_rightmost = roi.right() as i32 + 4;  // One past.
+    let gate_leftmost = roi.left() - 3;
+    let gate_rightmost = roi.right() + 4;  // One past.
     assert!(gate_leftmost >= 0);
     assert!(gate_rightmost <= width as i32);
 
     // We also need top/bottom margin to allow centroiding.
-    let top = roi.top() as i32 - 3;
-    let bottom = roi.bottom() as i32 + 4;  // One past.
+    let top = roi.top() - 3;
+    let bottom = roi.bottom() + 4;  // One past.
     assert!(top >= 0);
     assert!(bottom <= height as i32);
     let image_pixels: &Vec<u8> = image.as_raw();
@@ -1251,7 +1240,7 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
 
     // Apply centroiding to get sub-pixel resolution for peak_x/y.
     let bounding_box = Rect::at(peak_x - 2, peak_y - 2).of_size(5, 5);
-    let (mut x, mut y) = compute_peak_coord(&image, &bounding_box);
+    let (mut x, mut y) = compute_peak_coord(image, &bounding_box);
     x += 0.5;
     y += 0.5;
     // Constrain x/y to be within ROI.
@@ -1264,7 +1253,7 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
     let mut box_sum: i32 = 0;
     let mut box_count: i32 = 0;
     for (_x, _y, pixel_value) in EnumeratePixels::new(
-        &image, &value_box, /*include_interior=*/true) {
+        image, &value_box, /*include_interior=*/true) {
         box_sum += pixel_value as i32;
         box_count += 1;
     }
