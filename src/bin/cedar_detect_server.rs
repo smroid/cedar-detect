@@ -242,8 +242,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         prctl::set_death_signal(15).unwrap();
     }
 
-    // Listen on any address for the given port.
-    let addr = SocketAddr::from(([0, 0, 0, 0], args.port));
+    // Listen on localhost for the given port.
+    let addr = SocketAddr::from(([127, 0, 0, 1], args.port));
     info!("CedarDetectServer listening on {}", addr);
 
     tonic::transport::Server::builder()
