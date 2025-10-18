@@ -36,11 +36,3 @@ large_stack_arrays = "warn"
 # Code quality
 cloned_instead_of_copied = "warn"
 redundant_clone = "warn"
-
-[profile.release]
-# See https://github.com/johnthagen/min-sized-rust.
-# Separate step: use
-#   upx --best --lzma target/release/cedar-detect-server
-# to make a self-extracting compressed binary.
-strip = true
-lto = true
