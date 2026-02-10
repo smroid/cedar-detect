@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Steven Rosenthal smr@dt3.org
+// Copyright (c) 2026 Steven Rosenthal smr@dt3.org
 // See LICENSE file in root directory for license terms.
 
 //! CedarDetect provides efficient and accurate detection of stars in sky images.
@@ -128,6 +128,13 @@ use crate::histogram_funcs::{HistogramStats,
                              remove_stars_from_histogram,
                              stats_for_histogram};
 use crate::image_funcs::bin_and_histogram_2x2;
+
+// Compare two floats, treating NaN as equal to other values. This allows sorting
+// and comparison operations to complete without panicking if NaN values are
+// encountered, which could happen due to edge cases in calculations.
+fn compare_floats(a: &f64, b: &f64) -> std::cmp::Ordering {
+    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+}
 
 // An iterator over the pixels of a region of interest. Yields pixels in raster
 // scan order.
@@ -385,12 +392,9 @@ fn scan_image_for_candidates(image: &GrayImage,
                     let gate = &row_pixels[center_x-3..center_x+4];
                     let result_type = gate_star_1d(
                         gate, sigma_noise_2, sigma_noise_3);
-                    match result_type {
-                        ResultType::Uninteresting => (),
-                        ResultType::Candidate => {
-                            candidates.push(CandidateFrom1D{x: center_x as i32,
-                                                            y: rownum as i32});
-                        },
+                    if result_type == ResultType::Candidate {
+                        candidates.push(CandidateFrom1D{x: center_x as i32,
+                                                        y: rownum as i32});
                     }
                 }
             }
@@ -402,12 +406,9 @@ fn scan_image_for_candidates(image: &GrayImage,
                     let gate = &row_pixels[center_x-3..center_x+4];
                     let result_type = gate_star_1d(
                         gate, sigma_noise_2, sigma_noise_3);
-                    match result_type {
-                        ResultType::Uninteresting => (),
-                        ResultType::Candidate => {
-                            candidates.push(CandidateFrom1D{x: center_x as i32,
-                                                            y: rownum as i32});
-                        },
+                    if result_type == ResultType::Candidate {
+                        candidates.push(CandidateFrom1D{x: center_x as i32,
+                                                        y: rownum as i32});
                     }
                 }
             }
@@ -424,14 +425,14 @@ struct Blob {
     candidates: Vec<CandidateFrom1D>,
 
     // If candidates is empty, that means this blob has been merged into
-    // another blob.
-    recipient_blob: i32,
+    // another blob. None means no merge has occurred.
+    recipient_blob: Option<usize>,
 }
 
 #[derive(Copy, Clone)]
 struct LabeledCandidate {
     candidate: CandidateFrom1D,
-    blob_id: i32,
+    blob_id: usize,
 }
 
 // The scan_image_for_candidates() function can produce multiple candidates for
@@ -441,22 +442,19 @@ struct LabeledCandidate {
 //
 // The form_blobs_from_candidates() function gathers connected candidates into
 // blobs which will be further analyzed to determine if they are stars.
-fn form_blobs_from_candidates(candidates: Vec<CandidateFrom1D>)
+fn form_blobs_from_candidates(candidates: Vec<CandidateFrom1D>, max_y: usize)
                               -> Vec<Blob> {
     let blobs_start = Instant::now();
-    let mut labeled_candidates_by_row = Vec::<Vec<LabeledCandidate>>::new();
+    let mut labeled_candidates_by_row =
+        vec![Vec::<LabeledCandidate>::new(); max_y + 1];
 
-    let mut blobs: HashMap<i32, Blob> = HashMap::new();
+    let mut blobs: HashMap<usize, Blob> = HashMap::new();
     // Create an initial singular blob for each candidate.
     for (next_blob_id, candidate) in candidates.into_iter().enumerate() {
-        blobs.insert(next_blob_id as i32, Blob{candidates: vec![candidate],
-                                        recipient_blob: -1});
-        if candidate.y as usize >= labeled_candidates_by_row.len() {
-            labeled_candidates_by_row.resize(candidate.y as usize + 1,
-                                             Vec::<LabeledCandidate>::new());
-        }
+        blobs.insert(next_blob_id, Blob{candidates: vec![candidate],
+                                        recipient_blob: None});
         labeled_candidates_by_row[candidate.y as usize].push(
-            LabeledCandidate{candidate, blob_id: next_blob_id as i32});
+            LabeledCandidate{candidate, blob_id: next_blob_id});
     }
     // Merge adjacent blobs. Within a row blobs are not adjacent (by the nature of
     // how row scanning identifies candidates), so we just need to look for vertical
@@ -481,21 +479,24 @@ fn form_blobs_from_candidates(candidates: Vec<CandidateFrom1D>)
                 let mut donor_blob_id = prev_row_rc.blob_id;
                 let mut donated_candidates: Vec<CandidateFrom1D>;
                 loop {
-                    let donor_blob = blobs.get_mut(&donor_blob_id).unwrap();
+                    let donor_blob = blobs.get_mut(&donor_blob_id)
+                        .expect("donor_blob_id should always exist in blobs HashMap");
                     if !donor_blob.candidates.is_empty() {
                         donated_candidates = donor_blob.candidates.drain(..).collect();
-                        assert_eq!(donor_blob.recipient_blob, -1);
-                        donor_blob.recipient_blob = recipient_blob_id;
-                        let recipient_blob = &mut blobs.get_mut(&recipient_blob_id).unwrap();
+                        assert_eq!(donor_blob.recipient_blob, None);
+                        donor_blob.recipient_blob = Some(recipient_blob_id);
+                        let recipient_blob = &mut blobs.get_mut(&recipient_blob_id)
+                            .expect("recipient_blob_id should always exist in blobs HashMap");
                         recipient_blob.candidates.append(&mut donated_candidates);
                         break;
                     }
                     // donor_blob's candidates got merged to another blob.
-                    assert_ne!(donor_blob.recipient_blob, -1);
-                    if donor_blob.recipient_blob == recipient_blob_id {
+                    let merged_blob_id = donor_blob.recipient_blob
+                        .expect("if candidates are empty, must have been merged");
+                    if merged_blob_id == recipient_blob_id {
                         break;  // Already merged it.
                     }
-                    donor_blob_id = donor_blob.recipient_blob;
+                    donor_blob_id = merged_blob_id;
                 }
             }
         }
@@ -505,7 +506,7 @@ fn form_blobs_from_candidates(candidates: Vec<CandidateFrom1D>)
     let mut non_empty_blobs = Vec::<Blob>::new();
     for (_id, blob) in blobs {
         if !blob.candidates.is_empty() {
-            assert_eq!(blob.recipient_blob, -1);
+            assert_eq!(blob.recipient_blob, None);
             debug!("got blob {:?}", blob);
             non_empty_blobs.push(blob);
         }
@@ -897,7 +898,7 @@ pub fn estimate_noise_from_image(image: &GrayImage) -> f64 {
     let cut_size = cmp::min(50, width / 4);
 
     // Sample three areas across the horizontal midline of the image.
-    let mut stats_vec = vec![
+    let mut stats_arr = [
         stats_for_roi(image, &Rect::at(
             (width/4 - cut_size/2) as i32, (height/2) as i32).of_size(cut_size, 1)),
         stats_for_roi(image, &Rect::at(
@@ -906,8 +907,8 @@ pub fn estimate_noise_from_image(image: &GrayImage) -> f64 {
             (width*3/4 - cut_size/2) as i32, (height/2) as i32).of_size(cut_size, 1))
     ];
     // Pick the darkest cut by mean value.
-    stats_vec.sort_by(|a, b| a.mean.partial_cmp(&b.mean).unwrap());
-    let stddev = stats_vec[0].stddev;
+    stats_arr.sort_by(|a, b| compare_floats(&a.mean, &b.mean));
+    let stddev = stats_arr[0].stddev;
     debug!("Noise estimate {} found in {:?}", stddev, noise_start.elapsed());
     stddev
 }
@@ -1020,17 +1021,20 @@ pub fn get_stars_from_image(image: &GrayImage,
                                       /*compute_histogram=*/true);
         let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate + 0.5) as i16, 2);
         let mut filtered_candidates = Vec::<CandidateFrom1D>::new();
+        let mut max_y = 0usize;
         for cand in candidates_1d {
             if !detect_hot_pixels {
+                max_y = max_y.max(cand.y as usize);
                 filtered_candidates.push(cand);
             } else if all_bright_are_hot(image, cand.x, cand.y, binning,
                                   sigma_noise_2)  {
                 hot_pixel_count += 1;
             } else {
+                max_y = max_y.max(cand.y as usize);
                 filtered_candidates.push(cand);
             }
         }
-        for blob in form_blobs_from_candidates(filtered_candidates) {
+        for blob in form_blobs_from_candidates(filtered_candidates, max_y) {
             if let Some(x) = gate_star_2d(&blob, image,
                                /*full_res_image=*/image,
                                binning, noise_estimate, sigma,
@@ -1038,10 +1042,11 @@ pub fn get_stars_from_image(image: &GrayImage,
         }
 
         // Sort by brightness estimate, brightest first.
-        stars.sort_by(|a, b| b.brightness.partial_cmp(&a.brightness).unwrap());
+        stars.sort_by(|a, b| compare_floats(&b.brightness, &a.brightness));
 
         debug!("Star detection completed in {:?}", start.elapsed());
-        return (stars, hot_pixel_count, None, histogram.unwrap());
+        return (stars, hot_pixel_count, None,
+                histogram.expect("histogram should be Some since compute_histogram=true"));
     }
 
     // We are binning by 2x or 4x.
@@ -1064,17 +1069,20 @@ pub fn get_stars_from_image(image: &GrayImage,
         scan_image_for_candidates(&binned_image, noise_estimate_binned, sigma,
                                   /*compute_histogram=*/false);
     let mut filtered_candidates = Vec::<CandidateFrom1D>::new();
+    let mut max_y = 0usize;
     for cand in candidates_1d {
         if !detect_hot_pixels {
+            max_y = max_y.max(cand.y as usize);
             filtered_candidates.push(cand);
         } else if all_bright_are_hot(image, cand.x, cand.y, binning,
                               sigma_noise_2)  {
             hot_pixel_count += 1;
         } else {
+            max_y = max_y.max(cand.y as usize);
             filtered_candidates.push(cand);
         }
     }
-    for blob in form_blobs_from_candidates(filtered_candidates) {
+    for blob in form_blobs_from_candidates(filtered_candidates, max_y) {
         if let Some(x) = gate_star_2d(&blob, &binned_image,
                            /*full_res_image=*/image,
                            binning, noise_estimate_binned, sigma,
@@ -1082,7 +1090,7 @@ pub fn get_stars_from_image(image: &GrayImage,
     }
 
     // Sort by brightness estimate, brightest first.
-    stars.sort_by(|a, b| b.brightness.partial_cmp(&a.brightness).unwrap());
+    stars.sort_by(|a, b| compare_floats(&b.brightness, &a.brightness));
 
     debug!("Star detection completed in {:?}", detect_start.elapsed());
     (stars, hot_pixel_count, Some(binned_image), histogram)
@@ -1244,10 +1252,10 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
     x += 0.5;
     y += 0.5;
     // Constrain x/y to be within ROI.
-    x = cmp::max_by(x, roi.left() as f64, |a,b| a.partial_cmp(b).unwrap());
-    x = cmp::min_by(x, roi.right() as f64, |a,b| a.partial_cmp(b).unwrap());
-    y = cmp::max_by(y, roi.top() as f64, |a,b| a.partial_cmp(b).unwrap());
-    y = cmp::min_by(y, roi.bottom() as f64, |a,b| a.partial_cmp(b).unwrap());
+    x = cmp::max_by(x, roi.left() as f64, compare_floats);
+    x = cmp::min_by(x, roi.right() as f64, compare_floats);
+    y = cmp::max_by(y, roi.top() as f64, compare_floats);
+    y = cmp::min_by(y, roi.bottom() as f64, compare_floats);
 
     let value_box = Rect::at(peak_x - 1, peak_y - 1).of_size(3, 3);
     let mut box_sum: i32 = 0;
@@ -1511,14 +1519,16 @@ mod tests {
 
     #[test]
     fn test_form_blobs_from_candidates() {
-        let mut candidates = Vec::<CandidateFrom1D>::new();
+        let mut candidates = vec![
+            CandidateFrom1D{x: 20, y:3},
+            CandidateFrom1D{x: 23, y:3}
+        ];
         // Candidates on the same row are not combined, even if they are close
         // together. This is because, in practice due to the operation of
         // gate_star_1d(), candidates in the same row will always be well
         // separated.
-        candidates.push(CandidateFrom1D{x: 20, y:3});
-        candidates.push(CandidateFrom1D{x: 23, y:3});
-        let mut blobs = form_blobs_from_candidates(candidates);
+        let max_y = candidates.iter().map(|c| c.y as usize).max().unwrap_or(0);
+        let mut blobs = form_blobs_from_candidates(candidates, max_y);
         blobs.sort_by(|a, b| a.candidates[0].x.cmp(&b.candidates[0].x));
         assert_eq!(blobs.len(), 2);
         assert_eq!(blobs[0].candidates.len(), 1);
@@ -1533,46 +1543,56 @@ mod tests {
         // Not combined:
         // . . . . . A . . . . . .
         // . B . . . . . . . . . .
-        candidates = Vec::<CandidateFrom1D>::new();
-        candidates.push(CandidateFrom1D{x: 5, y:0});  // A.
-        candidates.push(CandidateFrom1D{x: 1, y:1});  // B.
-        blobs = form_blobs_from_candidates(candidates);
+        candidates = vec![
+            CandidateFrom1D{x: 5, y:0},  // A.
+            CandidateFrom1D{x: 1, y:1}   // B.
+        ];
+        let max_y = candidates.iter().map(|c| c.y as usize).max().unwrap_or(0);
+        blobs = form_blobs_from_candidates(candidates, max_y);
         assert_eq!(blobs.len(), 2);
 
         // Combined:
         // . . . . A . . . . . . .
         // . B . . . . . . . . . .
-        candidates = Vec::<CandidateFrom1D>::new();
-        candidates.push(CandidateFrom1D{x: 4, y:0});  // A.
-        candidates.push(CandidateFrom1D{x: 1, y:1});  // B.
-        blobs = form_blobs_from_candidates(candidates);
+        candidates = vec![
+            CandidateFrom1D{x: 4, y:0},  // A.
+            CandidateFrom1D{x: 1, y:1}   // B.
+        ];
+        let max_y = candidates.iter().map(|c| c.y as usize).max().unwrap_or(0);
+        blobs = form_blobs_from_candidates(candidates, max_y);
         assert_eq!(blobs.len(), 1);
 
         // Combined:
         // . . . . A . . . . . . .
         // . . . . B . . . . . . .
-        candidates = Vec::<CandidateFrom1D>::new();
-        candidates.push(CandidateFrom1D{x: 4, y:0});  // A.
-        candidates.push(CandidateFrom1D{x: 4, y:1});  // B.
-        blobs = form_blobs_from_candidates(candidates);
+        candidates = vec![
+            CandidateFrom1D{x: 4, y:0},  // A.
+            CandidateFrom1D{x: 4, y:1}   // B.
+        ];
+        let max_y = candidates.iter().map(|c| c.y as usize).max().unwrap_or(0);
+        blobs = form_blobs_from_candidates(candidates, max_y);
         assert_eq!(blobs.len(), 1);
 
         // Combined:
         // . . . . A . . . . . . .
         // . . . . . . . B . . . .
-        candidates = Vec::<CandidateFrom1D>::new();
-        candidates.push(CandidateFrom1D{x: 4, y:0});  // A.
-        candidates.push(CandidateFrom1D{x: 7, y:1});  // B.
-        blobs = form_blobs_from_candidates(candidates);
+        candidates = vec![
+            CandidateFrom1D{x: 4, y:0},  // A.
+            CandidateFrom1D{x: 7, y:1}   // B.
+        ];
+        let max_y = candidates.iter().map(|c| c.y as usize).max().unwrap_or(0);
+        blobs = form_blobs_from_candidates(candidates, max_y);
         assert_eq!(blobs.len(), 1);
 
         // Not combined:
         // . . . . A . . . . . . .
         // . . . . . . . . B . . .
-        candidates = Vec::<CandidateFrom1D>::new();
-        candidates.push(CandidateFrom1D{x: 4, y:0});  // A.
-        candidates.push(CandidateFrom1D{x: 8, y:1});  // B.
-        blobs = form_blobs_from_candidates(candidates);
+        candidates = vec![
+            CandidateFrom1D{x: 4, y:0},  // A.
+            CandidateFrom1D{x: 8, y:1}   // B.
+        ];
+        let max_y = candidates.iter().map(|c| c.y as usize).max().unwrap_or(0);
+        blobs = form_blobs_from_candidates(candidates, max_y);
         assert_eq!(blobs.len(), 2);
 
         // In this case, B absorbs A and C. When D is reached, it sees that C
@@ -1580,12 +1600,14 @@ mod tests {
         // absorbed A and C).
         // . A . . . C . . . . . .
         // . . . B . . . D . . . .
-        candidates = Vec::<CandidateFrom1D>::new();
-        candidates.push(CandidateFrom1D{x: 1, y:0});  // A.
-        candidates.push(CandidateFrom1D{x: 3, y:1});  // B.
-        candidates.push(CandidateFrom1D{x: 5, y:0});  // C.
-        candidates.push(CandidateFrom1D{x: 7, y:1});  // D.
-        blobs = form_blobs_from_candidates(candidates);
+        candidates = vec![
+            CandidateFrom1D{x: 1, y:0},  // A.
+            CandidateFrom1D{x: 3, y:1},  // B.
+            CandidateFrom1D{x: 5, y:0},  // C.
+            CandidateFrom1D{x: 7, y:1}   // D.
+        ];
+        let max_y = candidates.iter().map(|c| c.y as usize).max().unwrap_or(0);
+        blobs = form_blobs_from_candidates(candidates, max_y);
         assert_eq!(blobs.len(), 1);
         assert_eq!(blobs[0].candidates.len(), 4);
     }
@@ -1593,7 +1615,7 @@ mod tests {
     #[test]
     fn test_gate_star_2d_too_large() {
         let mut blob = Blob{candidates: Vec::<CandidateFrom1D>::new(),
-                            recipient_blob: -1};
+                            recipient_blob: None};
         let image_9x9 = gray_image!(
             9,  9,  9,  9,  9,  9,  9,  9,  9;
             9,  9,  9,  9,  9,  9,  9,  9,  9;
@@ -1629,7 +1651,7 @@ mod tests {
     #[test]
     fn test_gate_star_2d_image_boundary() {
         let mut blob = Blob{candidates: Vec::<CandidateFrom1D>::new(),
-                            recipient_blob: -1};
+                            recipient_blob: None};
         let image_7x7 = gray_image!(
         9,  9,  9,  9,  9,  9,  9;
         9, 10, 10, 10, 10, 10,  9;
@@ -1640,31 +1662,19 @@ mod tests {
         9,  9,  9,  9,  9,  9,  9);
         // Make 1x1 blob, but too far to the left.
         blob.candidates.push(CandidateFrom1D{x: 2, y: 3});
-        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) {
-            Some(_star_description) => panic!("Expected rejection"),
-            None => ()
-        }
+        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
         // Too far to right.
         blob.candidates.clear();
         blob.candidates.push(CandidateFrom1D{x: 4, y: 3});
-        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) {
-            Some(_star_description) => panic!("Expected rejection"),
-            None => ()
-        }
+        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
         // Too high.
         blob.candidates.clear();
         blob.candidates.push(CandidateFrom1D{x: 3, y: 2});
-        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) {
-            Some(_star_description) => panic!("Expected rejection"),
-            None => ()
-        }
+        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
         // Too low.
         blob.candidates.clear();
         blob.candidates.push(CandidateFrom1D{x: 3, y: 4});
-        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) {
-            Some(_star_description) => panic!("Expected rejection"),
-            None => ()
-        }
+        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
         // Just right!
         blob.candidates.clear();
         blob.candidates.push(CandidateFrom1D{x: 3, y: 3});
@@ -1677,7 +1687,7 @@ mod tests {
     #[test]
     fn test_gate_star_2d_hollow_core() {
         let mut blob = Blob{candidates: Vec::<CandidateFrom1D>::new(),
-                            recipient_blob: -1};
+                            recipient_blob: None};
         let mut image_9x9 = gray_image!(
             9,  9,  9,  9,  9,  9,  9,  9,  9;
             9,  9,  9,  9,  9,  9,  9,  9,  9;
@@ -1692,10 +1702,7 @@ mod tests {
         blob.candidates.push(CandidateFrom1D{x: 3, y: 3});
         blob.candidates.push(CandidateFrom1D{x: 5, y: 5});
         // Center of core is less bright than outer core.
-        match gate_star_2d(&blob, &image_9x9, &image_9x9, 1, 1.0, 6.0, 3, 3) {
-            Some(_star_description) => panic!("Expected rejection"),
-            None => (),
-        }
+        if let Some(_star_description) = gate_star_2d(&blob, &image_9x9, &image_9x9, 1, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
         // Make center bright enough.
         image_9x9.put_pixel(4, 4, Luma::<u8>([20]));
         match gate_star_2d(&blob, &image_9x9, &image_9x9, 1, 1.0, 6.0, 3, 3) {
@@ -1707,7 +1714,7 @@ mod tests {
     #[test]
     fn test_gate_star_2d_core_bright_wrt_neighbor() {
         let mut blob = Blob{candidates: Vec::<CandidateFrom1D>::new(),
-                            recipient_blob: -1};
+                            recipient_blob: None};
         blob.candidates.push(CandidateFrom1D{x: 3, y: 3});
         let mut image_7x7 = gray_image!(
         8,  8,  8,  8,  8,  8,  8;
@@ -1719,10 +1726,7 @@ mod tests {
         8,  8,  8,  8,  8,  8,  8);
         // 1x1 core is less bright than neighbor average. Note that the
         // neighbor corners are excluded.
-        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) {
-            Some(_star_description) => panic!("Expected rejection"),
-            None => (),
-        }
+        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
         // Make center bright enough.
         image_7x7.put_pixel(3, 3, Luma::<u8>([14]));
         match gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) {
@@ -1734,7 +1738,7 @@ mod tests {
     #[test]
     fn test_gate_star_2d_core_bright_wrt_margin() {
         let mut blob = Blob{candidates: Vec::<CandidateFrom1D>::new(),
-                            recipient_blob: -1};
+                            recipient_blob: None};
         blob.candidates.push(CandidateFrom1D{x: 3, y: 3});
         let mut image_7x7 = gray_image!(
         8,  8,  8,  8,  8,  8,  8;
@@ -1745,10 +1749,7 @@ mod tests {
         8, 14, 14, 14, 14, 14,  8;
         8,  8,  8,  8,  8,  8,  8);
         // 1x1 core is not brighter than margin average.
-        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) {
-            Some(_star_description) => panic!("Expected rejection"),
-            None => (),
-        }
+        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
         // Make center bright enough.
         image_7x7.put_pixel(3, 3, Luma::<u8>([15]));
         match gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) {
@@ -1760,7 +1761,7 @@ mod tests {
     #[test]
     fn test_gate_star_2d_nonuniform_perimeter() {
         let mut blob = Blob{candidates: Vec::<CandidateFrom1D>::new(),
-                            recipient_blob: -1};
+                            recipient_blob: None};
         blob.candidates.push(CandidateFrom1D{x: 3, y: 3});
         let mut image_7x7 = gray_image!(
         9,  9,  9,  9,  9,  9,  9;
@@ -1771,10 +1772,7 @@ mod tests {
         9, 10, 10, 10, 10, 10,  9;
         9,  9,  9,  9,  9,  9,  9);
         // Perimeter has an anomalously bright pixel.
-        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) {
-            Some(_star_description) => panic!("Expected rejection"),
-            None => (),
-        }
+        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
         // Repair the perimeter.
         image_7x7.put_pixel(0, 2, Luma::<u8>([12]));
         match gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) {
@@ -1786,7 +1784,7 @@ mod tests {
     #[test]
     fn test_gate_star_2d_core_bright_wrt_perimeter() {
         let mut blob = Blob{candidates: Vec::<CandidateFrom1D>::new(),
-                            recipient_blob: -1};
+                            recipient_blob: None};
         blob.candidates.push(CandidateFrom1D{x: 3, y: 3});
         let mut image_7x7 = gray_image!(
         8,  8,  8,  8,  8,  8,  8;
@@ -1797,10 +1795,7 @@ mod tests {
         8,  9,  9,  9,  9,  9,  8;
         8,  8,  8,  8,  8,  8,  8);
         // 1x1 core is not brighter enough than perimeter average.
-        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) {
-            Some(_star_description) => panic!("Expected rejection"),
-            None => (),
-        }
+        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
         // Make center bright enough.
         image_7x7.put_pixel(3, 3, Luma::<u8>([14]));
         match gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) {

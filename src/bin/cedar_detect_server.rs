@@ -1,4 +1,4 @@
-// Copyright (c) 2023 Steven Rosenthal smr@dt3.org
+// Copyright (c) 2026 Steven Rosenthal smr@dt3.org
 // See LICENSE file in root directory for license terms.
 
 use std::ffi::CString;
@@ -32,9 +32,8 @@ struct MyCedarDetect {
 
 impl MyCedarDetect {
     fn open(&self, name: &CString) -> Result<c_int, tonic::Status> {
-        let open_fd;
         unsafe {
-            open_fd = shm_open(name.as_ptr(), O_RDONLY, 0);
+            let open_fd = shm_open(name.as_ptr(), O_RDONLY, 0);
             if open_fd < 0 {
                 let msg = format!(
                     "Could not open shared memory at {:?}: errno {}",
@@ -44,8 +43,8 @@ impl MyCedarDetect {
                 // fall back to not using shared memory.
                 return Err(tonic::Status::internal(msg))
             }
+            Ok(open_fd)
         }
-        Ok(open_fd)
     }
 
     fn close(&self, fd: c_int) {
@@ -60,9 +59,11 @@ impl MyCedarDetect {
 
 impl Drop for MyCedarDetect {
     fn drop(&mut self) {
-        let mut fd_ref = self.fd.lock().unwrap();
-        self.close(fd_ref.unwrap());
-        *fd_ref = None;
+        if let Ok(mut fd_ref) = self.fd.lock() {
+            if let Some(fd) = fd_ref.take() {
+                self.close(fd);
+            }
+        }
     }
 }
 
@@ -75,25 +76,26 @@ impl CedarDetect for MyCedarDetect {
         let rpc_start = Instant::now();
         let req: cedar_detect::CentroidsRequest = request.into_inner();
 
-        if req.input_image.is_none() {
+        let input_image = if let Some(img) = req.input_image {
+            img
+        } else {
             return Err(tonic::Status::invalid_argument(
                 "Request 'input_image' field is missing"));
-        }
-        let input_image = req.input_image.unwrap();
+        };
 
-        let req_image;
         let mut addr: *mut c_void = std::ptr::null_mut();
         let mut num_pixels = 0;
-        let using_shmem = input_image.shmem_name.is_some();
-        if using_shmem {
+        let req_image = if let Some(ref shmem_name) = input_image.shmem_name {
             let mut fd_ref = self.fd.lock().unwrap();
             if input_image.reopen_shmem {
-                self.close(fd_ref.unwrap());
-                *fd_ref = None;
+                if let Some(fd) = fd_ref.take() {
+                    self.close(fd);
+                }
             }
 
             num_pixels = (input_image.width * input_image.height) as usize;
-            let name = CString::new(input_image.shmem_name.unwrap()).unwrap();
+            let name = CString::new(shmem_name.as_str())
+                .expect("shmem_name from protobuf cannot contain null bytes");
             debug!("Using shared memory at {:?}", name);
             if fd_ref.is_none() {
                 *fd_ref = Some(self.open(&name)?);
@@ -116,28 +118,29 @@ impl CedarDetect for MyCedarDetect {
                 // 'addr'.
                 let vec_shmem = Vec::<u8>::from_raw_parts(addr as *mut u8,
                                                           num_pixels, num_pixels);
-                req_image = GrayImage::from_raw(input_image.width as u32,
-                                                input_image.height as u32,
-                                                vec_shmem).unwrap();
+                GrayImage::from_raw(input_image.width as u32,
+                                    input_image.height as u32,
+                                    vec_shmem).unwrap()
             }
         } else {
-            req_image = GrayImage::from_raw(input_image.width as u32,
-                                            input_image.height as u32,
-                                            input_image.image_data).unwrap();
-        }
+            GrayImage::from_raw(input_image.width as u32,
+                                input_image.height as u32,
+                                input_image.image_data).unwrap()
+        };
 
-        let mut binning = 1;
-        if req.use_binned_for_star_candidates || req.return_binned {
-            binning = match req.binning {
+        let binning = if req.use_binned_for_star_candidates || req.return_binned {
+            match req.binning {
                 None => 2,
                 Some(2) => 2,
                 Some(4) => 4,
-                _ => {
+                Some(val) => {
                     return Err(tonic::Status::invalid_argument(format!(
-                        "Invalid binning {}", req.binning.unwrap())));
+                        "Invalid binning {}", val)));
                 }
             }
-        }
+        } else {
+            1
+        };
 
         let noise_estimate = estimate_noise_from_image(&req_image);
         let (stars, hot_pixel_count, binned_image, _histogram) = get_stars_from_image(
@@ -165,7 +168,7 @@ impl CedarDetect for MyCedarDetect {
                              estimate_background_region.height as u32)).0);
         }
 
-        if using_shmem {
+        if input_image.shmem_name.is_some() {
             // Deconstruct req_image that is referencing shared memory.
             let vec_shmem = req_image.into_raw();
             vec_shmem.leak();  // vec_shmem no longer "owns" the shared memory.
@@ -203,20 +206,15 @@ impl CedarDetect for MyCedarDetect {
             hot_pixel_count,
             peak_star_pixel: if num_peak > 0 { sum_peak / num_peak } else { 255 },
             star_candidates: candidates,
-            binned_image: if binned_image.is_some() {
-                let bimg: GrayImage = binned_image.unwrap();
-                Some(cedar_detect::Image {
+            binned_image: binned_image.map(|bimg| cedar_detect::Image {
                     width: bimg.width() as i32,
                     height: bimg.height() as i32,
                     image_data: bimg.into_raw(),
                     shmem_name: None,
                     reopen_shmem: false,
-                })
-            } else {
-                None
-            },
-            algorithm_time: Some(prost_types::Duration::try_from(
-                rpc_start.elapsed()).unwrap()),
+                }),
+            algorithm_time: prost_types::Duration::try_from(
+                rpc_start.elapsed()).ok(),
         };
         Ok(tonic::Response::new(response))
     }
@@ -236,7 +234,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
 
-    // Arrange to die if parent dies on linux
+    // On Linux, arrange to die if parent dies.
     #[cfg(target_os="linux")]
     {
         prctl::set_death_signal(15).unwrap();

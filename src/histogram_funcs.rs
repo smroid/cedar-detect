@@ -1,4 +1,4 @@
-// Copyright (c) 2024 Steven Rosenthal smr@dt3.org
+// Copyright (c) 2026 Steven Rosenthal smr@dt3.org
 // See LICENSE file in root directory for license terms.
 
 use std::cmp::{max, min};
@@ -13,8 +13,7 @@ pub struct HistogramStats {
 pub fn stats_for_histogram(histogram: &[u32]) -> HistogramStats {
     let mut count = 0;
     let mut first_moment = 0;
-    for h in 0..histogram.len() {
-        let bin_count = histogram[h];
+    for (h, &bin_count) in histogram.iter().enumerate() {
         count += bin_count;
         first_moment += bin_count * h as u32;
     }
@@ -25,8 +24,7 @@ pub fn stats_for_histogram(histogram: &[u32]) -> HistogramStats {
     let mut second_moment: f64 = 0.0;
     let mut sub_count = 0;
     let mut median = 0;
-    for h in 0..histogram.len() {
-        let bin_count = histogram[h];
+    for (h, &bin_count) in histogram.iter().enumerate() {
         second_moment += bin_count as f64 * (h as f64 - mean) * (h as f64 - mean);
         if sub_count < count / 2 {
             sub_count += bin_count;
@@ -46,8 +44,8 @@ pub fn estimate_dark_level(pixel_histogram: &[u32], npoints: usize) -> f32 {
     let one_percent = (npoints / 100) as u32;
     if one_percent == 0 {
         // Too little data; just return the lowest non-zero bin.
-        for h in 0..pixel_histogram.len() {
-            if pixel_histogram[h] > 0 {
+        for (h, &count) in pixel_histogram.iter().enumerate() {
+            if count > 0 {
                 return h as f32;
             }
         }
@@ -57,8 +55,7 @@ pub fn estimate_dark_level(pixel_histogram: &[u32], npoints: usize) -> f32 {
     let mut accum = 0;
     let mut accum_remaining = one_percent;
 
-    for h in 0..pixel_histogram.len() {
-        let bin_count = pixel_histogram[h];
+    for (h, &bin_count) in pixel_histogram.iter().enumerate() {
         if bin_count == 0 {
             continue;
         }
@@ -81,14 +78,11 @@ pub fn estimate_dark_level(pixel_histogram: &[u32], npoints: usize) -> f32 {
 pub fn get_level_for_fraction(histogram: &[u32], fraction: f64) -> usize {
     assert!(fraction >= 0.0);
     assert!(fraction <= 1.0);
+    let total_count: u32 = histogram.iter().sum();
+    let goal = (fraction * total_count as f64) as u32;
     let mut count = 0;
-    for h in 0..histogram.len() {
-        count += histogram[h];
-    }
-    let goal = (fraction * count as f64) as u32;
-    count = 0;
-    for h in 0..histogram.len() {
-        count += histogram[h];
+    for (h, &bin_count) in histogram.iter().enumerate() {
+        count += bin_count;
         if count >= goal {
             return h;
         }
@@ -124,37 +118,33 @@ pub fn average_top_values(histogram: &[u32], num_top_values: usize) -> u8 {
 /// estimate.
 /// What remains is deemed to be the histogram of the non-star image pixels.
 pub fn remove_stars_from_histogram(histogram: &mut [u32], sigma: f64) {
-    let mut pixel_count = 0;
-    for h in 0..histogram.len() {
-        pixel_count += histogram[h];
-    }
+    let pixel_count: u32 = histogram.iter().sum();
     // Do a sloppy trim of the brightest pixels; this will give us a (probably
     // overly) de-starred mean and stddev that we can use for a more precise
     // trim.
-    let mut copied_histogram: Vec<u32> = Vec::new();
-    copied_histogram.extend_from_slice(histogram);
+    let mut copied_histogram = histogram.to_vec();
     trim_histogram(&mut copied_histogram, pixel_count * 9 / 10);
     let stats = stats_for_histogram(&copied_histogram);
     // Any pixel whose value is sigma * stddev above the mean is deemed a star and
     // kicked out of the histogram.
     let star_cutoff = (stats.mean +
                        sigma * f64::max(stats.stddev, 1.0)) as usize;
-    for h in 0..histogram.len() {
+    for (h, bin) in histogram.iter_mut().enumerate() {
         if h >= star_cutoff {
-            histogram[h] = 0;
+            *bin = 0;
         }
     }
 }
 
 fn trim_histogram(histogram: &mut [u32], count_to_keep: u32) {
     let mut count = 0;
-    for h in 0..histogram.len() {
-        let bin_count = histogram[h];
+    for bin in histogram.iter_mut() {
+        let bin_count = *bin;
         if count + bin_count > count_to_keep {
             let excess = count + bin_count - count_to_keep;
-            histogram[h] -= excess;
+            *bin -= excess;
         }
-        count += histogram[h];
+        count += *bin;
     }
 }
 
