@@ -117,7 +117,6 @@
 //!   lens distortion corrections when doing astrometry (e.g. plate solving).
 
 use std::cmp;
-use std::collections::hash_map::HashMap;
 use std::time::Instant;
 
 use image::GrayImage;
@@ -448,11 +447,11 @@ fn form_blobs_from_candidates(candidates: Vec<CandidateFrom1D>, max_y: usize)
     let mut labeled_candidates_by_row =
         vec![Vec::<LabeledCandidate>::new(); max_y + 1];
 
-    let mut blobs: HashMap<usize, Blob> = HashMap::new();
+    let mut blobs: Vec<Blob> = Vec::with_capacity(candidates.len());
     // Create an initial singular blob for each candidate.
     for (next_blob_id, candidate) in candidates.into_iter().enumerate() {
-        blobs.insert(next_blob_id, Blob{candidates: vec![candidate],
-                                        recipient_blob: None});
+        blobs.push(Blob{candidates: vec![candidate],
+                        recipient_blob: None});
         labeled_candidates_by_row[candidate.y as usize].push(
             LabeledCandidate{candidate, blob_id: next_blob_id});
     }
@@ -479,14 +478,12 @@ fn form_blobs_from_candidates(candidates: Vec<CandidateFrom1D>, max_y: usize)
                 let mut donor_blob_id = prev_row_rc.blob_id;
                 let mut donated_candidates: Vec<CandidateFrom1D>;
                 loop {
-                    let donor_blob = blobs.get_mut(&donor_blob_id)
-                        .expect("donor_blob_id should always exist in blobs HashMap");
+                    let donor_blob = &mut blobs[donor_blob_id];
                     if !donor_blob.candidates.is_empty() {
                         donated_candidates = donor_blob.candidates.drain(..).collect();
                         assert_eq!(donor_blob.recipient_blob, None);
                         donor_blob.recipient_blob = Some(recipient_blob_id);
-                        let recipient_blob = &mut blobs.get_mut(&recipient_blob_id)
-                            .expect("recipient_blob_id should always exist in blobs HashMap");
+                        let recipient_blob = &mut blobs[recipient_blob_id];
                         recipient_blob.candidates.append(&mut donated_candidates);
                         break;
                     }
@@ -504,7 +501,7 @@ fn form_blobs_from_candidates(candidates: Vec<CandidateFrom1D>, max_y: usize)
     // Return non-empty blobs. Note that the blob merging we just did will leave
     // some empty entries in the `blobs` mapping.
     let mut non_empty_blobs = Vec::<Blob>::new();
-    for (_id, blob) in blobs {
+    for blob in blobs {
         if !blob.candidates.is_empty() {
             assert_eq!(blob.recipient_blob, None);
             debug!("got blob {:?}", blob);
