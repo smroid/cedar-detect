@@ -3,7 +3,7 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use image::{ImageReader, Rgb};
@@ -31,10 +31,6 @@ struct Args {
     /// Statistical significance factor.
     #[arg(short, long, default_value_t = 8.0)]
     sigma: f64,
-
-    /// Maximum star size.
-    #[arg(short, long, default_value_t = 8)]
-    max_size: u32,
 
     /// Whether image rows should be normalized to have same dark levels.
     /// Relevant only when binning > 1.
@@ -67,22 +63,29 @@ fn main() {
     });
     assert!(output_metadata.is_dir(),
             "Output '{}' must be a directory", args.output);
+    let mut total_stars: usize = 0;
+    let mut total_elapsed = Duration::ZERO;
     if input_metadata.is_dir() {
         // Enumerate and process all of the files in the directory.
         for entry in fs::read_dir(&args.input).unwrap() {
             let path = entry.unwrap().path();
             if path.is_file() {
-                process_file(path.to_str().unwrap(), &args);
+                let (stars, elapsed) = process_file(path.to_str().unwrap(), &args);
+                total_stars += stars;
+                total_elapsed += elapsed;
             }
         }
     } else {
         // Process the single file.
         assert!(input_metadata.is_file());
-        process_file(args.input.as_str(), &args);
+        let (stars, elapsed) = process_file(args.input.as_str(), &args);
+        total_stars += stars;
+        total_elapsed += elapsed;
     }
+    info!("Total: {} stars detected in {:?}", total_stars, total_elapsed);
 }
 
-fn process_file(file: &str, args: &Args) {
+fn process_file(file: &str, args: &Args) -> (usize, Duration) {
     info!("Processing {}", file);
     let input_path = PathBuf::from(&file);
     let mut output_path = PathBuf::from(&args.output);
@@ -93,7 +96,7 @@ fn process_file(file: &str, args: &Args) {
         Ok(img) => img,
         Err(e) => {
             warn!("Skipping {:?} due to: {:?}", input_path, e);
-            return;
+            return (0, Duration::ZERO);
         },
     };
     let img_u8 = img.to_luma8();
@@ -127,6 +130,7 @@ fn process_file(file: &str, args: &Args) {
             Rgb::<u8>([circle_brightness, 0, 0]));
     }
     img_color.save(output_path).unwrap();
+    let num_stars = stars.len();
     if args.coords {
         let mut coords_str = String::new();
         coords_str.push_str(format!("# WxH {}x{}\n", width, height).as_str());
@@ -137,4 +141,5 @@ fn process_file(file: &str, args: &Args) {
         }
         info!("{}", coords_str);
     }
+    (num_stars, elapsed)
 }
