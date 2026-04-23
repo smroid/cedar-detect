@@ -390,32 +390,97 @@ fn scan_image_for_candidates(image: &GrayImage,
         let threshold = row_min.saturating_add(sigma_noise_2 as u8 / 2);
 
         // Second pass: pixel loop, only create gates when needed.
-        if compute_histogram {
-            for center_x in 3..(row_pixels.len()-3) {
-                let center_pixel = row_pixels[center_x];
-                histogram[center_pixel as usize] += 1;
-                if center_pixel >= threshold {
-                    let gate = &row_pixels[center_x-3..center_x+4];
-                    let result_type = gate_star_1d(
-                        gate, sigma_noise_2, sigma_noise_3);
-                    if result_type == ResultType::Candidate {
-                        candidates.push(CandidateFrom1D{x: center_x as i32,
-                                                        y: rownum as i32});
+        let end_x = row_pixels.len().saturating_sub(3);
+        if end_x > 3 {
+            let inner_pixels = &row_pixels[3..end_x];
+            let mut center_x = 3;
+            
+            let mut chunks = inner_pixels.chunks_exact(8);
+            let t16 = (threshold as u64) * 0x0001000100010001;
+
+            if compute_histogram {
+                for chunk in chunks.by_ref() {
+                    for &p in chunk {
+                        histogram[p as usize] += 1;
+                    }
+                    
+                    let w = u64::from_ne_bytes(chunk.try_into().unwrap());
+                    let w_even = (w & 0x00FF00FF00FF00FF) | 0x0100010001000100;
+                    let w_odd = ((w >> 8) & 0x00FF00FF00FF00FF) | 0x0100010001000100;
+                    
+                    let diff_even = w_even.wrapping_sub(t16);
+                    let diff_odd = w_odd.wrapping_sub(t16);
+                    
+                    if (diff_even | diff_odd) & 0x0100010001000100 != 0 {
+                        for &center_pixel in chunk {
+                            if center_pixel >= threshold {
+                                let gate = &row_pixels[center_x-3..center_x+4];
+                                let result_type = gate_star_1d(
+                                    gate, sigma_noise_2, sigma_noise_3);
+                                if result_type == ResultType::Candidate {
+                                    candidates.push(CandidateFrom1D{x: center_x as i32,
+                                                                    y: rownum as i32});
+                                }
+                            }
+                            center_x += 1;
+                        }
+                    } else {
+                        center_x += 8;
                     }
                 }
-            }
-        } else {
-            // Identical except omits histogram update.
-            for center_x in 3..(row_pixels.len()-3) {
-                let center_pixel = row_pixels[center_x];
-                if center_pixel >= threshold {
-                    let gate = &row_pixels[center_x-3..center_x+4];
-                    let result_type = gate_star_1d(
-                        gate, sigma_noise_2, sigma_noise_3);
-                    if result_type == ResultType::Candidate {
-                        candidates.push(CandidateFrom1D{x: center_x as i32,
-                                                        y: rownum as i32});
+                
+                for &center_pixel in chunks.remainder() {
+                    histogram[center_pixel as usize] += 1;
+                    if center_pixel >= threshold {
+                        let gate = &row_pixels[center_x-3..center_x+4];
+                        let result_type = gate_star_1d(
+                            gate, sigma_noise_2, sigma_noise_3);
+                        if result_type == ResultType::Candidate {
+                            candidates.push(CandidateFrom1D{x: center_x as i32,
+                                                            y: rownum as i32});
+                        }
                     }
+                    center_x += 1;
+                }
+            } else {
+                // Identical except omits histogram update.
+                for chunk in chunks.by_ref() {
+                    let w = u64::from_ne_bytes(chunk.try_into().unwrap());
+                    let w_even = (w & 0x00FF00FF00FF00FF) | 0x0100010001000100;
+                    let w_odd = ((w >> 8) & 0x00FF00FF00FF00FF) | 0x0100010001000100;
+                    
+                    let diff_even = w_even.wrapping_sub(t16);
+                    let diff_odd = w_odd.wrapping_sub(t16);
+                    
+                    if (diff_even | diff_odd) & 0x0100010001000100 != 0 {
+                        for &center_pixel in chunk {
+                            if center_pixel >= threshold {
+                                let gate = &row_pixels[center_x-3..center_x+4];
+                                let result_type = gate_star_1d(
+                                    gate, sigma_noise_2, sigma_noise_3);
+                                if result_type == ResultType::Candidate {
+                                    candidates.push(CandidateFrom1D{x: center_x as i32,
+                                                                    y: rownum as i32});
+                                }
+                            }
+                            center_x += 1;
+                        }
+                    } else {
+                        center_x += 8;
+                    }
+                }
+                
+                for &center_pixel in chunks.remainder() {
+                    if center_pixel >= threshold {
+                        let gate = &row_pixels[center_x-3..center_x+4];
+                        let result_type = gate_star_1d(
+                            gate, sigma_noise_2, sigma_noise_3);
+                        if result_type == ResultType::Candidate {
+                            candidates.push(CandidateFrom1D{x: center_x as i32,
+                                                            y: rownum as i32});
+                        }
+                    }
+                    center_x += 1;
                 }
             }
         }

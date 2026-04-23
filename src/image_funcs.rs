@@ -50,16 +50,61 @@ fn bin_and_histogram_2x2_default(image: &GrayImage, normalize_rows: bool)
     let source_pixels = source_image.as_raw();
 
     for y in (0..height & !1).step_by(2) {  // Ensure even height bound
-        for x in (0..width & !1).step_by(2) {   // Ensure even width bound
-            // Get 2x2 block.
-            let p1 = source_pixels[(y * width + x) as usize] as u16;
-            let p2 = source_pixels[(y * width + x + 1) as usize] as u16;
-            let p3 = source_pixels[((y + 1) * width + x) as usize] as u16;
-            let p4 = source_pixels[((y + 1) * width + x + 1) as usize] as u16;
-
-            // Average the 2x2 block.
+        let row1_start = (y * width) as usize;
+        let row2_start = ((y + 1) * width) as usize;
+        
+        let row1_pixels = &source_pixels[row1_start..row1_start + (width as usize & !1)];
+        let row2_pixels = &source_pixels[row2_start..row2_start + (width as usize & !1)];
+        
+        let mut chunks1 = row1_pixels.chunks_exact(8);
+        let mut chunks2 = row2_pixels.chunks_exact(8);
+        
+        for (chunk1, chunk2) in chunks1.by_ref().zip(chunks2.by_ref()) {
+            let w1 = u64::from_ne_bytes(chunk1.try_into().unwrap());
+            let w2 = u64::from_ne_bytes(chunk2.try_into().unwrap());
+            
+            // Mask out odd bytes to sum even bytes: (p0, p2, p4, p6)
+            let even1 = w1 & 0x00FF00FF00FF00FF;
+            let even2 = w2 & 0x00FF00FF00FF00FF;
+            
+            // Shift down odd bytes to sum them: (p1, p3, p5, p7)
+            let odd1 = (w1 >> 8) & 0x00FF00FF00FF00FF;
+            let odd2 = (w2 >> 8) & 0x00FF00FF00FF00FF;
+            
+            // Sum horizontally within each row: (p0+p1, p2+p3, p4+p5, p6+p7)
+            let sum1 = even1 + odd1;
+            let sum2 = even2 + odd2;
+            
+            // Sum vertically across rows and divide by 4 (shift right by 2)
+            // (p0+p1+p0'+p1')/4, (p2+p3+p2'+p3')/4, etc.
+            let avg = (sum1 + sum2) >> 2;
+            
+            // Extract the 4 average bytes back out
+            // Since they are spaced every 16 bits, we can just mask and pack
+            let avg_bytes = [
+                (avg & 0xFF) as u8,
+                ((avg >> 16) & 0xFF) as u8,
+                ((avg >> 32) & 0xFF) as u8,
+                ((avg >> 48) & 0xFF) as u8,
+            ];
+            
+            resized_image.extend_from_slice(&avg_bytes);
+            
+            // Histogram update must remain scalar
+            histogram[avg_bytes[0] as usize] += 1;
+            histogram[avg_bytes[1] as usize] += 1;
+            histogram[avg_bytes[2] as usize] += 1;
+            histogram[avg_bytes[3] as usize] += 1;
+        }
+        
+        // Handle remainder for widths not divisible by 8 (but divisible by 2)
+        for (chunk1, chunk2) in chunks1.remainder().chunks_exact(2).zip(chunks2.remainder().chunks_exact(2)) {
+            let p1 = chunk1[0] as u16;
+            let p2 = chunk1[1] as u16;
+            let p3 = chunk2[0] as u16;
+            let p4 = chunk2[1] as u16;
+            
             let avg = ((p1 + p2 + p3 + p4) / 4) as u8;
-
             resized_image.push(avg);
             histogram[avg as usize] += 1;
         }
