@@ -140,14 +140,22 @@ fn for_each_pixel_in_roi<F>(image: &GrayImage, roi: &Rect, mut f: F)
 where
     F: FnMut(i32, i32, u8),
 {
-    let width = image.width() as usize;
+    let (width, height) = {
+        let (w, h) = image.dimensions();
+        (w as usize, h as usize)
+    };
+    assert!(roi.left() >= 0);
+    assert!(roi.top() >= 0);
+    assert!(roi.right() < width as i32);
+    assert!(roi.bottom() < height as i32);
     let raw = image.as_raw();
     let left = roi.left() as usize;
     let top = roi.top() as usize;
     let bottom = roi.bottom() as usize;
     let w = roi.width() as usize;
-    if w == 0 || roi.height() == 0 { return; }
-
+    if w == 0 || roi.height() == 0 {
+        return;
+    }
     for y in top..=bottom {
         let row_start = y * width;
         let row_slice = &raw[row_start + left .. row_start + left + w];
@@ -162,24 +170,32 @@ fn for_each_perimeter_pixel<F>(image: &GrayImage, roi: &Rect, mut f: F)
 where
     F: FnMut(i32, i32, u8),
 {
-    let width = image.width() as usize;
+    let (width, height) = {
+        let (w, h) = image.dimensions();
+        (w as usize, h as usize)
+    };
+    assert!(roi.left() >= 0);
+    assert!(roi.top() >= 0);
+    assert!(roi.right() < width as i32);
+    assert!(roi.bottom() < height as i32);
     let raw = image.as_raw();
     let left = roi.left() as usize;
     let top = roi.top() as usize;
     let bottom = roi.bottom() as usize;
     let w = roi.width() as usize;
-    if w == 0 || roi.height() == 0 { return; }
+    if w == 0 || roi.height() == 0 {
+        return;
+    }
     let right = left + w - 1;
 
-    // Top row
+    // Top row.
     let top_row_start = top * width;
     let top_row_slice = &raw[top_row_start + left .. top_row_start + left + w];
     for (i, &pixel) in top_row_slice.iter().enumerate() {
         f((left + i) as i32, top as i32, pixel);
     }
-
     if bottom > top {
-        // Middle rows
+        // Middle rows.
         for y in (top + 1)..bottom {
             let row_start = y * width;
             f(left as i32, y as i32, raw[row_start + left]);
@@ -187,8 +203,7 @@ where
                 f(right as i32, y as i32, raw[row_start + right]);
             }
         }
-
-        // Bottom row
+        // Bottom row.
         let bot_row_start = bottom * width;
         let bot_row_slice = &raw[bot_row_start + left .. bot_row_start + left + w];
         for (i, &pixel) in bot_row_slice.iter().enumerate() {
@@ -675,11 +690,10 @@ fn gate_star_2d(
         let is_corner =
             (x == neighbors.left() || x == neighbors.right()) &&
             (y == neighbors.top() || y == neighbors.bottom());
-        if is_corner {
-            return;  // Exclude corner pixels.
+        if !is_corner {
+            neighbor_sum += i32::from(pixel_value);
+            neighbor_count += 1;
         }
-        neighbor_sum += i32::from(pixel_value);
-        neighbor_count += 1;
     });
     let neighbor_mean = neighbor_sum as f64 / neighbor_count as f64;
     // Core average must be at least as bright as the neighbor average.
@@ -1274,6 +1288,13 @@ mod tests {
     use super::*;
 
     #[test]
+    #[should_panic]
+    fn test_for_each_pixel_in_roi_too_large() {
+        let empty_image = gray_image!();
+        for_each_pixel_in_roi(&empty_image, &Rect::at(0, 0).of_size(1, 1), |_x, _y, _p| {});
+    }
+
+    #[test]
     fn test_for_each_pixel_in_roi_1x1() {
         let image_1x1 = gray_image!(127);
         let mut pixels = Vec::new();
@@ -1304,7 +1325,7 @@ mod tests {
                                 (0, 2, 255),
                                 (1, 2, 0),
                                 (2, 2, 1)));
-                                
+
         // Entire ROI, no interior.
         let mut perimeter_pixels = Vec::new();
         for_each_perimeter_pixel(&image_3x3, &Rect::at(0, 0).of_size(3, 3), |x, y, p| {
