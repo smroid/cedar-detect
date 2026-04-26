@@ -1035,7 +1035,7 @@ pub fn get_stars_from_image(image: &GrayImage,
                 max_y = max_y.max(cand.y as usize);
                 filtered_candidates.push(cand);
             } else if all_bright_are_hot(image, cand.x, cand.y, binning,
-                                  sigma_noise_2)  {
+                                         sigma_noise_2) {
                 hot_pixel_count += 1;
             } else {
                 max_y = max_y.max(cand.y as usize);
@@ -1046,7 +1046,9 @@ pub fn get_stars_from_image(image: &GrayImage,
             if let Some(x) = gate_star_2d(&blob, image,
                                /*full_res_image=*/image,
                                binning, noise_estimate, sigma,
-                               max_size, max_size) { stars.push(x) }
+                               max_size, max_size) {
+                stars.push(x)
+            }
         }
 
         // Sort by brightness estimate, brightest first.
@@ -1083,7 +1085,7 @@ pub fn get_stars_from_image(image: &GrayImage,
             max_y = max_y.max(cand.y as usize);
             filtered_candidates.push(cand);
         } else if all_bright_are_hot(image, cand.x, cand.y, binning,
-                              sigma_noise_2)  {
+                                     sigma_noise_2)  {
             hot_pixel_count += 1;
         } else {
             max_y = max_y.max(cand.y as usize);
