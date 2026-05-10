@@ -10,22 +10,51 @@ pub struct Binned2x2Result {
     pub histogram: [u32; 256],
 }
 
-pub type BinnerFn = fn(&GrayImage, bool) -> Binned2x2Result;
+pub type BinAndHistoFn = fn(&GrayImage, bool) -> Binned2x2Result;
+pub type Bin2x2Fn = fn(&GrayImage) -> GrayImage;
 
-static BINNER_FN: OnceLock<BinnerFn> = OnceLock::new();
+static BIN_AND_HISTO_FN: OnceLock<BinAndHistoFn> = OnceLock::new();
+static BIN2X2_FN: OnceLock<Bin2x2Fn> = OnceLock::new();
 
-pub fn set_binner(func: BinnerFn) {
-    log::info!("Setting image preprocessing function.");
-    let _ = BINNER_FN.set(func);  // Ignores error if already set.
+pub fn set_binner(bin_and_histo: BinAndHistoFn, bin2x2: Bin2x2Fn) {
+    log::info!("Setting image binning functions.");
+    let _ = BIN_AND_HISTO_FN.set(bin_and_histo); // Ignores error if already set.
+    let _ = BIN2X2_FN.set(bin2x2); // Ignores error if already set.
 }
 
 // `normalize_rows` Determines whether rows are normalized to have the same dark
 //     level. See IMX296mono notes below.
 pub fn bin_and_histogram_2x2(image: &GrayImage, normalize_rows: bool) -> Binned2x2Result {
-    match BINNER_FN.get() {
+    match BIN_AND_HISTO_FN.get() {
         Some(f) => f(image, normalize_rows),
         None => bin_and_histogram_2x2_default(image, normalize_rows),
     }
+}
+
+pub fn bin_2x2(image: &GrayImage) -> GrayImage {
+    match BIN2X2_FN.get() {
+        Some(f) => f(image),
+        None => bin_2x2_default(image),
+    }
+}
+
+// Default implementation, used if set_binner() was not called.
+fn bin_2x2_default(image: &GrayImage) -> GrayImage {
+    let (width, height) = image.dimensions();
+    let new_width = width / 2;
+    let new_height = height / 2;
+    let mut resized_image = Vec::with_capacity((new_width * new_height) as usize);
+    let source_pixels = image.as_raw();
+    for y in (0..height & !1).step_by(2) {
+        for x in (0..width & !1).step_by(2) {
+            let p1 = source_pixels[(y * width + x) as usize] as u16;
+            let p2 = source_pixels[(y * width + x + 1) as usize] as u16;
+            let p3 = source_pixels[((y + 1) * width + x) as usize] as u16;
+            let p4 = source_pixels[((y + 1) * width + x + 1) as usize] as u16;
+            resized_image.push(((p1 + p2 + p3 + p4) / 4) as u8);
+        }
+    }
+    GrayImage::from_raw(new_width, new_height, resized_image).unwrap()
 }
 
 // Default implementation, used if set_binner() was not called.
@@ -148,5 +177,27 @@ mod tests {
         // All other histogram bins should be 0
         let total_pixels: u32 = result.histogram.iter().sum();
         assert_eq!(total_pixels, 4); // 2x2 output image
+    }
+
+    #[test]
+    fn test_bin_2x2() {
+        // Same 4x4 image as test_bin_and_histogram_2x2.
+        let mut img = GrayImage::new(4, 4);
+        for y in 0..4 {
+            for x in 0..4 {
+                img.put_pixel(x, y, Luma([((y * 4 + x) as u8 + 1)]));
+            }
+        }
+
+        let result = bin_2x2(&img);
+        assert_eq!(result.dimensions(), (2, 2));
+        assert_eq!(result.get_pixel(0, 0)[0], 3);   // [1,2,5,6]    -> 3
+        assert_eq!(result.get_pixel(1, 0)[0], 5);   // [3,4,7,8]    -> 5
+        assert_eq!(result.get_pixel(0, 1)[0], 11);  // [9,10,13,14] -> 11
+        assert_eq!(result.get_pixel(1, 1)[0], 13);  // [11,12,15,16] -> 13
+
+        // Result must match bin_and_histogram_2x2 (normalize_rows=false).
+        let full = bin_and_histogram_2x2(&img, false);
+        assert_eq!(result.as_raw(), full.binned.as_raw());
     }
 }
