@@ -12,7 +12,7 @@
 //! * Adapts to different image exposure levels.
 //! * Estimates noise in the image and adapts the star detection threshold
 //!   accordingly.
-//! * Automatically classifies and rejects isolated hot pixels.
+//! * Optionally classifies and rejects isolated hot pixels.
 //! * Rejects trailed objects such as aircraft lights or satellites.
 //! * Tolerates the presence of bright interlopers such as the moon or
 //!   streetlights.
@@ -321,44 +321,6 @@ fn gate_star_1d(gate: &[u8], sigma_noise_2: i16, sigma_noise_3: i16)
 struct CandidateFrom1D {
     x: i32,
     y: i32,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum PixelHotType {
-    Dark,  // Pixel is not bright compared to threshold.
-    Bright,  // Pixel is bright compared to threshold but is not isolated (hot).
-    Hot,  // Pixel is bright compared to threshold and is isolated (hot).
-}
-
-// Returns Dark if the center pixel is not bright, so is neither part of a
-// star nor an isolated hot pixel.
-// Returns Bright if the center pixel is bright enough to possibly be part
-// of a star.
-// Returns Hot if the center of the 7-pixel gate is an isolated hot pixel. In
-// this case the pixel value is replaced with the average of its neighbors.
-fn classify_pixel(gate: &[u8], sigma_noise_2: i16) -> (PixelHotType, u8)
-{
-    let lb = gate[0] as i16;
-    let c = gate[3] as i16;
-    let rb = gate[6] as i16;
-
-    // Hot pixel must be bright compared to background.
-    let est_background_2 = lb + rb;
-    let center_minus_background_2 = c + c - est_background_2;
-    if center_minus_background_2 < sigma_noise_2 {
-        return (PixelHotType::Dark, gate[3]);
-    }
-
-    // Sum of l + r (minus background) must exceed 0.25 * center (minus
-    // background). Otherwise, the center is a hot pixel.
-    let l = gate[2] as i16;
-    let r = gate[4] as i16;
-    let neighbor_sum = l + r;
-    let neighbor_sum_minus_background = neighbor_sum - est_background_2;
-    if 4 * neighbor_sum_minus_background <= center_minus_background_2 / 2 {
-        return (PixelHotType::Hot, (neighbor_sum / 2) as u8);
-    }
-    (PixelHotType::Bright, c as u8)
 }
 
 // Applies gate_star_1d() at all pixel positions of the image (excluding the few
@@ -968,6 +930,8 @@ fn stats_for_roi(image: &GrayImage, roi: &Rect) -> HistogramStats {
 ///
 ///   `detect_hot_pixels` If true isolated hot pixels are detected and not
 ///   treated as stars. If false isolated hot pixels might be reported as stars.
+///   When true, the input `image` should be at full sensor resolution, so that
+///   we can best discriminate isolated hot pixels.
 ///
 ///   `return_binned_image` If true, the 2x2 or 4x4 binning of `image` is
 ///   returned. Invalid if `binning` is 1.
@@ -1141,6 +1105,44 @@ fn all_bright_are_hot(full_res_image: &GrayImage,
     }
     // All pixels are dark or hot.
     true
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum PixelHotType {
+    Dark,  // Pixel is not bright compared to threshold.
+    Bright,  // Pixel is bright compared to threshold but is not isolated (hot).
+    Hot,  // Pixel is bright compared to threshold and is isolated (hot).
+}
+
+// Returns Dark if the center pixel is not bright, so is neither part of a
+// star nor an isolated hot pixel.
+// Returns Bright if the center pixel is bright enough to possibly be part
+// of a star.
+// Returns Hot if the center of the 7-pixel gate is an isolated hot pixel. In
+// this case the pixel value is replaced with the average of its neighbors.
+fn classify_pixel(gate: &[u8], sigma_noise_2: i16) -> (PixelHotType, u8)
+{
+    let lb = gate[0] as i16;
+    let c = gate[3] as i16;
+    let rb = gate[6] as i16;
+
+    // Hot pixel must be bright compared to background.
+    let est_background_2 = lb + rb;
+    let center_minus_background_2 = c + c - est_background_2;
+    if center_minus_background_2 < sigma_noise_2 {
+        return (PixelHotType::Dark, gate[3]);
+    }
+
+    // Sum of l + r (minus background) must exceed 0.25 * center (minus
+    // background). Otherwise, the center is a hot pixel.
+    let l = gate[2] as i16;
+    let r = gate[4] as i16;
+    let neighbor_sum = l + r;
+    let neighbor_sum_minus_background = neighbor_sum - est_background_2;
+    if 4 * neighbor_sum_minus_background <= center_minus_background_2 / 2 {
+        return (PixelHotType::Hot, (neighbor_sum / 2) as u8);
+    }
+    (PixelHotType::Bright, c as u8)
 }
 
 /// Summarizes an image region of interest. The pixel values used are not
