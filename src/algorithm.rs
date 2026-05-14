@@ -3,7 +3,9 @@
 
 //! CedarDetect provides efficient and accurate detection of stars in sky images.
 //! Given an image, CedarDetect returns a list of detected star centroids expressed
-//! in image pixel coordinates.
+//! in image pixel coordinates. The input image may be the camera's native full
+//! resolution or may already be binned (e.g. 2x2 binned by the camera); centroid
+//! coordinates are always in the pixel space of whichever image is supplied.
 //!
 //! Features:
 //!
@@ -499,8 +501,10 @@ fn form_blobs_from_candidates(candidates: Vec<CandidateFrom1D>, max_y: usize)
 /// Summarizes a star-like spot found by [get_stars_from_image()].
 #[derive(Debug, Copy, Clone)]
 pub struct StarDescription {
-    /// Location of star centroid in image coordinates. (0.5, 0.5) corresponds
-    /// to the center of the image's upper left pixel.
+    /// Location of star centroid in the pixel space of the `image` argument
+    /// passed to [get_stars_from_image()]. (0.5, 0.5) corresponds to the center
+    /// of that image's upper left pixel. If the camera already binned the image
+    /// before passing it in, these coordinates are in that binned space.
     pub centroid_x: f64,
     pub centroid_y: f64,
 
@@ -924,9 +928,10 @@ fn stats_for_roi(image: &GrayImage, roi: &Rect) -> HistogramStats {
 ///   level. Ignored if `binning` is 1.
 ///
 ///   `binning` 1 (no binning), 2 (2x2 binning), or 4 (4x4 binning). Specifies
-///   whether `image` should be binned prior to star detction. Note that
-///   computing the centroids of detected stars is always done in the full
-///   resolution `image`.
+///   whether `image` should be additionally binned inside this function prior
+///   to star detection. Note that computing the centroids of detected stars is
+///   always done in the coordinate space of the input `image` (which may itself
+///   already be binned by the camera).
 ///
 ///   `detect_hot_pixels` If true isolated hot pixels are detected and not
 ///   treated as stars. If false isolated hot pixels might be reported as stars.
