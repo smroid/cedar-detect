@@ -979,9 +979,10 @@ pub fn get_stars_from_image(image: &GrayImage,
 
     let start = Instant::now();
 
-    // If noise estimate is below 0.25, assume that the image background has been
-    // crushed to black; use a minimum noise value.
-    let noise_estimate = f64::max(noise_estimate, 0.25);
+    // If noise estimate is below noise_floor, assume that the image background
+    // has been crushed to black; use a minimum noise value.
+    let noise_floor = 0.2;
+    let noise_estimate = f64::max(noise_estimate, noise_floor);
 
     let mut stars = Vec::<StarDescription>::new();
     let mut hot_pixel_count = 0_i32;
@@ -1037,7 +1038,8 @@ pub fn get_stars_from_image(image: &GrayImage,
         binned_image = binned_images.binned;
         histogram = binned_images.histogram;
     }
-    let noise_estimate_binned = f64::max(estimate_noise_from_image(&binned_image), 0.25);
+    let noise_estimate_binned =
+        f64::max(estimate_noise_from_image(&binned_image), noise_floor);
 
     debug!("Image preprocessing completed in {:?}", start.elapsed());
     let detect_start = Instant::now();
