@@ -557,18 +557,23 @@ pub struct StarDescription {
 // Statistical significance is defined as a `sigma` multiple of the
 // `noise_estimate`.
 //
-// image: This is either the original full resolution image, or a 2x2 or 4x4
-//     binned image.
+// image: This is either the original full resolution image, or a 2x2, 4x4, or
+//     8x8 binned image.
 //
-// full_res_image: Regardless of whether `image` is the original or a 2x2 or 4x4
-//     binning, we arrange to do centroiding on the original resolution image.
+// higher_res_image: if binning == 1, this is the same as 'image'. For other
+//     binning values, this is the one-less binned image preceding 'image' in
+//     the binning cascade. For example, if binning==4, image is 4x binned and
+//     higher_res_image is only 2x binned.
 //
-// binning: 1 (no binning), 2, or 4.
+// Regardless of whether `image` is the original or a 2x, 4x, or 8x binning,
+//     we arrange to do centroiding on the higher resolution image.
+//
+// binning: 1 (no binning), 2, 4, or 8.
 
 fn gate_star_2d(
     blob: &Blob,
     image: &GrayImage,
-    full_res_image: &GrayImage,
+    higher_res_image: &GrayImage,
     binning: u32,
     noise_estimate: f64, sigma: f64,
     max_width: u32, max_height: u32) -> Option<StarDescription>
@@ -735,29 +740,34 @@ fn gate_star_2d(
 
     let brightness;
     let num_saturated;
-    let x;
-    let y;
+    let mut x;
+    let mut y;
     let peak_value;
     if binning != 1 {
-        // The `image` is binned. Compute moments using the full-res image.
-        // Translate the margin (in the binned image) to the full-res image.
-        let left = margin.left() as u32 * binning;
-        let top = margin.top() as u32 * binning;
-        let width = margin.width() * binning;
-        let height = margin.height() * binning;
+        // The `image` is binned. Compute moments using the higher-res image,
+        // which is 2x less binned than `image`. Translate the margin from
+        // detection-image space to higher_res_image space (scale=2), centroid
+        // there, then scale up by binning/2 to reach captured-image space.
+        let left = margin.left() as u32 * 2;
+        let top = margin.top() as u32 * 2;
+        let width = margin.width() * 2;
+        let height = margin.height() * 2;
         let adj_width = cmp::min(left + width,
-                                 full_res_image.width()) - left;
+                                 higher_res_image.width()) - left;
         let adj_height = cmp::min(top + height,
-                                  full_res_image.height()) - top;
-        let full_res_margin =
+                                  higher_res_image.height()) - top;
+        let higher_res_margin =
             Rect::at(left as i32, top as i32).of_size(adj_width, adj_height);
         (brightness, num_saturated, peak_value) =
-            compute_brightness(full_res_image, &full_res_margin);
-        (x, y) = compute_peak_coord(full_res_image, &full_res_margin);
+            compute_brightness(higher_res_image, &higher_res_margin);
+        (x, y) = compute_peak_coord(higher_res_image, &higher_res_margin);
+        let upsample = (binning / 2) as f64;
+        x *= upsample;
+        y *= upsample;
     } else {
         (brightness, num_saturated, peak_value) =
-            compute_brightness(full_res_image, &margin);
-        (x, y) = compute_peak_coord(full_res_image, &margin);
+            compute_brightness(image, &margin);
+        (x, y) = compute_peak_coord(image, &margin);
     }
     Some(StarDescription{centroid_x: x + 0.5,
                          centroid_y: y + 0.5,
@@ -927,19 +937,19 @@ fn stats_for_roi(image: &GrayImage, roi: &Rect) -> HistogramStats {
 ///   `normalize_rows` Determines whether rows are normalized to have the same dark
 ///   level. Ignored if `binning` is 1.
 ///
-///   `binning` 1 (no binning), 2 (2x2 binning), or 4 (4x4 binning). Specifies
-///   whether `image` should be additionally binned inside this function prior
-///   to star detection. Note that computing the centroids of detected stars is
-///   always done in the coordinate space of the input `image` (which may itself
-///   already be binned by the camera).
+///   `binning` 1 (no binning), 2 (2x2 binning), 4 (4x4 binning), or 8 (8x8
+///   binning). Specifies whether `image` should be additionally binned inside
+///   this function prior to star detection. Note that the centroids of detected
+///   stars is always reported in the coordinate space of the input `image`
+///   (which may itself already be binned by the camera).
 ///
 ///   `detect_hot_pixels` If true isolated hot pixels are detected and not
 ///   treated as stars. If false isolated hot pixels might be reported as stars.
 ///   When true, the input `image` should be at full sensor resolution, so that
 ///   we can best discriminate isolated hot pixels.
 ///
-///   `return_binned_image` If true, the 2x2 or 4x4 binning of `image` is
-///   returned. Invalid if `binning` is 1.
+///   `return_binned_image` If true, the 2x2 binning of `image` is returned.
+///   Invalid if `binning` is 1.
 ///
 /// # Returns
 /// Vec<[StarDescription]>, in order of descending estimated brightness.
@@ -947,8 +957,8 @@ fn stats_for_roi(image: &GrayImage, roi: &Rect) -> HistogramStats {
 /// i32: The number of isolated hot pixels seen. See implementation for more
 ///   information about isolated hot pixels.
 ///
-/// Option<GrayImage>: if `return_binned_image` is true, the 2x2 or 4x4 binning
-///   of `image` is returned.
+/// Option<GrayImage>: if `return_binned_image` is true, the 2x2 binning of
+///   `image` is returned.
 ///
 /// [u32; 256]: histogram of the `image` pixel values. Excludes the few leftmost
 ///   and rightmost columns. If `return_binned_image`, the histogram is over
@@ -971,9 +981,9 @@ pub fn get_stars_from_image(image: &GrayImage,
                 panic!("cannot 'return_binned_image' when binning==1");
             }
         },
-        2 | 4 => (),
+        2 | 4 | 8 => (),
         _ => {
-            panic!("Invalid binning argument {}, must be 1, 2, or 4", binning);
+            panic!("Invalid binning argument {}, must be 1, 2, 4, or 8", binning);
         }
     }
 
@@ -1014,7 +1024,7 @@ pub fn get_stars_from_image(image: &GrayImage,
         }
         for blob in form_blobs_from_candidates(filtered_candidates, max_y) {
             if let Some(x) = gate_star_2d(&blob, image,
-                               /*full_res_image=*/image,
+                               /*higher_res_image=*/image,
                                binning, noise_estimate, sigma,
                                max_size, max_size) {
                 stars.push(x)
@@ -1029,17 +1039,36 @@ pub fn get_stars_from_image(image: &GrayImage,
                 histogram.expect("histogram should be Some since compute_histogram=true"));
     }
 
-    // We are binning by 2x or 4x.
-    let mut binned_images = bin_and_histogram_2x2(image, normalize_rows);
-    let mut binned_image = binned_images.binned;
-    let mut histogram = binned_images.histogram;
-    if binning == 4 {
-        binned_images = bin_and_histogram_2x2(&binned_image, /*normalize_rows=*/false);
-        binned_image = binned_images.binned;
-        histogram = binned_images.histogram;
+    // We are binning by 2x, 4x, or 8x.
+    let (binned_2x, histogram_2x) = {
+        let r = bin_and_histogram_2x2(image, normalize_rows);
+        (r.binned, r.histogram)
+    };
+    // higher_res_image: one binning level below detect_image, used for
+    // centroiding.
+    let higher_res_image: &GrayImage;
+    let detect_image: &GrayImage;
+    let binned_4x;   // must outlive borrows for binning==4/8
+    let binned_8x;   // must outlive borrow for binning==8
+    if binning == 2 {
+        detect_image = &binned_2x;
+        higher_res_image = image;
+    } else {
+        let bin_result = bin_and_histogram_2x2(&binned_2x, /*normalize_rows=*/false);
+        binned_4x = bin_result.binned;
+        if binning == 4 {
+            detect_image = &binned_4x;
+            higher_res_image = &binned_2x;
+        } else {
+            // binning == 8
+            let bin_result = bin_and_histogram_2x2(&binned_4x, /*normalize_rows=*/false);
+            binned_8x = bin_result.binned;
+            detect_image = &binned_8x;
+            higher_res_image = &binned_4x;
+        }
     }
     let noise_estimate_binned =
-        f64::max(estimate_noise_from_image(&binned_image), noise_floor);
+        f64::max(estimate_noise_from_image(&detect_image), noise_floor);
 
     debug!("Image preprocessing completed in {:?}", start.elapsed());
     let detect_start = Instant::now();
@@ -1047,7 +1076,7 @@ pub fn get_stars_from_image(image: &GrayImage,
     let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate_binned + 0.5) as i16, 2);
 
     let (candidates_1d, _) =
-        scan_image_for_candidates(&binned_image, noise_estimate_binned, sigma,
+        scan_image_for_candidates(&detect_image, noise_estimate_binned, sigma,
                                   /*compute_histogram=*/false);
     let mut filtered_candidates = Vec::<CandidateFrom1D>::new();
     let mut max_y = 0usize;
@@ -1064,8 +1093,8 @@ pub fn get_stars_from_image(image: &GrayImage,
         }
     }
     for blob in form_blobs_from_candidates(filtered_candidates, max_y) {
-        if let Some(x) = gate_star_2d(&blob, &binned_image,
-                           /*full_res_image=*/image,
+        if let Some(x) = gate_star_2d(&blob, &detect_image,
+                           &higher_res_image,
                            binning, noise_estimate_binned, sigma,
                            max_size/binning + 1, max_size/binning + 1) { stars.push(x) }
     }
@@ -1074,7 +1103,7 @@ pub fn get_stars_from_image(image: &GrayImage,
     stars.sort_by(|a, b| compare_floats(&b.brightness, &a.brightness));
 
     debug!("Star detection completed in {:?}", detect_start.elapsed());
-    (stars, hot_pixel_count, Some(binned_image), histogram)
+    (stars, hot_pixel_count, Some(binned_2x), histogram_2x)
 }
 
 // Given a star candidate in a (possibly) binned image, see if any pixel(s) in
