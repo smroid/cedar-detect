@@ -23,7 +23,6 @@ fn benchmark_detection_all_images() {
 
     // Algorithm parameters matching the defaults from test_cedar_detect.rs
     let sigma = 8.0;
-    let normalize_rows = false;
     let binning = 2;
     let hot_pixels = true;
     let iterations = 1000;
@@ -72,7 +71,6 @@ fn benchmark_detection_all_images() {
                 &img_u8,
                 noise_estimate,
                 sigma,
-                normalize_rows,
                 binning,
                 hot_pixels,
                 false // return_binned_image

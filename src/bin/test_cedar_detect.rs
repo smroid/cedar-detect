@@ -32,11 +32,6 @@ struct Args {
     #[arg(short, long, default_value_t = 8.0)]
     sigma: f64,
 
-    /// Whether image rows should be normalized to have same dark levels.
-    /// Relevant only when binning > 1.
-    #[arg(short, long, default_value_t = false)]
-    normalize_rows: std::primitive::bool,
-
     /// Whether image should be binned. 1 (no binning), 2, or 4.
     #[arg(short, long, default_value_t = 2)]
     binning: u32,
@@ -108,8 +103,7 @@ fn process_file(file: &str, args: &Args) -> (usize, Duration) {
         &img_u8, &Rect::at(0, 0).of_size(100, 100)).0;
     let (stars, _, _, _) = get_stars_from_image(
         &img_u8, noise_estimate, args.sigma,
-        args.normalize_rows, args.binning,
-        args.hot_pixels, /*return_binned_image=*/false);
+        args.binning, args.hot_pixels, /*return_binned_image=*/false);
     let elapsed = star_extraction_start.elapsed();
     info!("WxH: {}x{}; noise level {} background {}",
           width, height, noise_estimate, background_estimate);

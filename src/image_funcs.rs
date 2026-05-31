@@ -3,14 +3,13 @@
 
 use image::GrayImage;
 use std::sync::OnceLock;
-use crate::histogram_funcs::estimate_dark_level;
 
 pub struct Binned2x2Result {
     pub binned: GrayImage,
     pub histogram: [u32; 256],
 }
 
-pub type BinAndHistoFn = fn(&GrayImage, bool) -> Binned2x2Result;
+pub type BinAndHistoFn = fn(&GrayImage) -> Binned2x2Result;
 pub type Bin2x2Fn = fn(&GrayImage) -> GrayImage;
 
 static BIN_AND_HISTO_FN: OnceLock<BinAndHistoFn> = OnceLock::new();
@@ -22,12 +21,10 @@ pub fn set_binner(bin_and_histo: BinAndHistoFn, bin2x2: Bin2x2Fn) {
     let _ = BIN2X2_FN.set(bin2x2); // Ignores error if already set.
 }
 
-// `normalize_rows` Determines whether rows are normalized to have the same dark
-//     level. See IMX296mono notes below.
-pub fn bin_and_histogram_2x2(image: &GrayImage, normalize_rows: bool) -> Binned2x2Result {
+pub fn bin_and_histogram_2x2(image: &GrayImage) -> Binned2x2Result {
     match BIN_AND_HISTO_FN.get() {
-        Some(f) => f(image, normalize_rows),
-        None => bin_and_histogram_2x2_default(image, normalize_rows),
+        Some(f) => f(image),
+        None => bin_and_histogram_2x2_default(image),
     }
 }
 
@@ -58,17 +55,9 @@ fn bin_2x2_default(image: &GrayImage) -> GrayImage {
 }
 
 // Default implementation, used if set_binner() was not called.
-fn bin_and_histogram_2x2_default(image: &GrayImage, normalize_rows: bool)
-                                -> Binned2x2Result
+fn bin_and_histogram_2x2_default(image: &GrayImage) -> Binned2x2Result
 {
-    let normalized;
-    let source_image = if normalize_rows {
-        normalized = apply_row_normalization(image);
-        &normalized
-    } else {
-        image
-    };
-    let (width, height) = source_image.dimensions();
+    let (width, height) = image.dimensions();
 
     // 2x2 box filter.
     let new_width = width / 2;
@@ -76,7 +65,7 @@ fn bin_and_histogram_2x2_default(image: &GrayImage, normalize_rows: bool)
     let mut resized_image = Vec::with_capacity((new_width * new_height) as usize);
     let mut histogram = [0u32; 256];
 
-    let source_pixels = source_image.as_raw();
+    let source_pixels = image.as_raw();
 
     for y in (0..height & !1).step_by(2) {  // Ensure even height bound
         for x in (0..width & !1).step_by(2) {   // Ensure even width bound
@@ -99,42 +88,6 @@ fn bin_and_histogram_2x2_default(image: &GrayImage, normalize_rows: bool)
     Binned2x2Result { binned: output_image, histogram }
 }
 
-// The IMX296mono camera on Raspberry Pi Zero 2 W has a noise problem that
-// causes some rows to differ in offset. We estimate the dark level for each row
-// and equalize all rows to the same 'bias' dark level during the binning
-// process.
-fn apply_row_normalization(image: &GrayImage) -> GrayImage {
-    let (width, height) = image.dimensions();
-    let mut normalized_pixels = Vec::with_capacity((width * height) as usize);
-    let source_pixels = image.as_raw();
-
-    for y in 0..height {
-        // Build histogram for this row.
-        let mut row_histogram = [0u32; 256];
-        let row_start = (y * width) as usize;
-        let row_end = ((y + 1) * width) as usize;
-
-        for &pixel in &source_pixels[row_start..row_end] {
-            row_histogram[pixel as usize] += 1;
-        }
-
-        // Get estimated dark level for this row.
-        let row_dark_level =
-            estimate_dark_level(&row_histogram, width as usize);
-        let bias = 2.0;
-        let adjust = (bias - row_dark_level).round() as i16;
-
-        // Normalize row pixels.
-        for &pixel in &source_pixels[row_start..row_end] {
-            let adjusted = (pixel as i16) + adjust;
-            let normalized = adjusted.clamp(0, 255) as u8;
-            normalized_pixels.push(normalized);
-        }
-    }
-
-    GrayImage::from_raw(width, height, normalized_pixels).unwrap()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,7 +105,7 @@ mod tests {
             }
         }
 
-        let result = bin_and_histogram_2x2(&img, /*normalize_rows=*/false);
+        let result = bin_and_histogram_2x2(&img);
         assert_eq!(result.binned.dimensions(), (2, 2));
 
         // Check the sums and histogram.
@@ -196,8 +149,8 @@ mod tests {
         assert_eq!(result.get_pixel(0, 1)[0], 11);  // [9,10,13,14] -> 11
         assert_eq!(result.get_pixel(1, 1)[0], 13);  // [11,12,15,16] -> 13
 
-        // Result must match bin_and_histogram_2x2 (normalize_rows=false).
-        let full = bin_and_histogram_2x2(&img, false);
+        // Result must match bin_and_histogram_2x2.
+        let full = bin_and_histogram_2x2(&img);
         assert_eq!(result.as_raw(), full.binned.as_raw());
     }
 }

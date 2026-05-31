@@ -53,7 +53,7 @@ message CentroidsRequest {
   // detected as stars.
   bool detect_hot_pixels = 6;
 
-  // Determines whether rows are normalized to have the same dark level.
+  // Ignored.
   bool normalize_rows = 9;
 
   // If provided, specifies a portion of `input_image` over which the background

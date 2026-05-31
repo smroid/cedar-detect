@@ -934,9 +934,6 @@ fn stats_for_roi(image: &GrayImage, roi: &Rect) -> HistogramStats {
 ///   stars; lower `sigma` values yield more stars but increase the likelihood
 ///   of noise-induced false positives. Typical `sigma` values: 5-10.
 ///
-///   `normalize_rows` Determines whether rows are normalized to have the same dark
-///   level. Ignored if `binning` is 1.
-///
 ///   `binning` 1 (no binning), 2 (2x2 binning), 4 (4x4 binning), or 8 (8x8
 ///   binning). Specifies whether `image` should be additionally binned inside
 ///   this function prior to star detection. Note that the centroids of detected
@@ -966,7 +963,6 @@ fn stats_for_roi(image: &GrayImage, roi: &Rect) -> HistogramStats {
 pub fn get_stars_from_image(image: &GrayImage,
                             noise_estimate: f64,
                             sigma: f64,
-                            normalize_rows: bool,
                             binning: u32,
                             detect_hot_pixels: bool,
                             return_binned_image: bool)
@@ -1041,7 +1037,7 @@ pub fn get_stars_from_image(image: &GrayImage,
 
     // We are binning by 2x, 4x, or 8x.
     let (binned_2x, histogram_2x) = {
-        let r = bin_and_histogram_2x2(image, normalize_rows);
+        let r = bin_and_histogram_2x2(image);
         (r.binned, r.histogram)
     };
     // higher_res_image: one binning level below detect_image, used for
@@ -1054,14 +1050,14 @@ pub fn get_stars_from_image(image: &GrayImage,
         detect_image = &binned_2x;
         higher_res_image = image;
     } else {
-        let bin_result = bin_and_histogram_2x2(&binned_2x, /*normalize_rows=*/false);
+        let bin_result = bin_and_histogram_2x2(&binned_2x);
         binned_4x = bin_result.binned;
         if binning == 4 {
             detect_image = &binned_4x;
             higher_res_image = &binned_2x;
         } else {
             // binning == 8
-            let bin_result = bin_and_histogram_2x2(&binned_4x, /*normalize_rows=*/false);
+            let bin_result = bin_and_histogram_2x2(&binned_4x);
             binned_8x = bin_result.binned;
             detect_image = &binned_8x;
             higher_res_image = &binned_4x;
