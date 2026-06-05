@@ -37,7 +37,7 @@ struct Args {
     binning: u32,
 
     /// Whether hot pixels should be detected.
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = false)]
     hot_pixels: std::primitive::bool,
 
     /// Output list of star centroids.
