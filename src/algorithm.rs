@@ -128,7 +128,7 @@ use log::{debug};
 use crate::histogram_funcs::{HistogramStats,
                              remove_stars_from_histogram,
                              stats_for_histogram};
-use crate::image_funcs::bin_2x2;
+use crate::image_funcs::{bin_2x2, get_row_scanner};
 
 // Compare two floats, treating NaN as equal to other values. This allows sorting
 // and comparison operations to complete without panicking if NaN values are
@@ -319,61 +319,77 @@ fn gate_star_1d(gate: &[u8], sigma_noise_2: i16, sigma_noise_3: i16)
     ResultType::Candidate
 }
 
+/// Public wrapper around gate_star_1d() for use by external NEON row scanners.
+/// `gate` must be a 7-element slice centered on the candidate pixel.
+/// Returns true if the pixel qualifies as a star candidate.
+pub fn gate_star_1d_pub(gate: &[u8], sigma_noise_2: i16, sigma_noise_3: i16) -> bool {
+    gate_star_1d(gate, sigma_noise_2, sigma_noise_3) == ResultType::Candidate
+}
+
 #[derive(Copy, Clone, Debug)]
 struct CandidateFrom1D {
     x: i32,
     y: i32,
 }
 
-// Applies gate_star_1d() at all pixel positions of the image (excluding the few
-// leftmost and rightmost columns) to identify star candidates for futher
-// screening.
-// `image` Image to be scanned.
-// `noise_estimate` The noise level of the image. See estimate_noise_from_image().
-// `sigma` Specifies the multiple of the noise level by which a pixel must exceed
-//     the background to be considered a star candidate, in addition to
-//     satisfying other criteria.
-// Returns:
-// Vec<CandidateFrom1D>: the identifed star candidates, in raster scan order.
+// Default per-row implementation: samples every 64 bytes to estimate the row
+// minimum, derives a threshold from it, then calls gate_star_1d() for each
+// pixel above the threshold.
+fn scan_row_for_candidates_default(
+    image: &GrayImage,
+    rownum: usize,
+    sigma_noise_2: i16,
+    sigma_noise_3: i16,
+    candidates: &mut Vec<(i32, i32)>,
+) {
+    let width = image.width() as usize;
+    let row_pixels = &image.as_raw()[rownum * width..(rownum + 1) * width];
+
+    // First pass: sample every cache line (64 bytes) to estimate row minimum.
+    let mut row_min = 255u8;
+    for i in (0..row_pixels.len()).step_by(64) {
+        row_min = row_min.min(row_pixels[i]);
+    }
+    let threshold = row_min.saturating_add(sigma_noise_2 as u8 / 2);
+
+    // Second pass: pixel loop, calling gate_star_1d() for pixels above threshold.
+    for center_x in 3..(row_pixels.len() - 3) {
+        let center_pixel = row_pixels[center_x];
+        if center_pixel >= threshold {
+            let gate = &row_pixels[center_x - 3..center_x + 4];
+            if gate_star_1d(gate, sigma_noise_2, sigma_noise_3) == ResultType::Candidate {
+                candidates.push((center_x as i32, rownum as i32));
+            }
+        }
+    }
+}
+
+// Applies scan_row_for_candidates at all rows of the image to identify star
+// candidates for further screening.
 fn scan_image_for_candidates(image: &GrayImage,
                              noise_estimate: f64,
                              sigma: f64)
                              -> Vec<CandidateFrom1D>
 {
     let row_scan_start = Instant::now();
-    let width = image.dimensions().0 as usize;
-    let height = image.dimensions().1 as usize;
-    let image_pixels: &Vec<u8> = image.as_raw();
+    let width = image.width() as usize;
+    let height = image.height() as usize;
 
     let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate + 0.5) as i16, 2);
     let sigma_noise_3 = cmp::max((3.0 * sigma * noise_estimate + 0.5) as i16, 3);
 
+    let scan_row = get_row_scanner().unwrap_or(scan_row_for_candidates_default);
+
     let estimated_candidates = (width * height) / 10000;
-    let mut candidates = Vec::<CandidateFrom1D>::with_capacity(estimated_candidates);
+    let mut xy_candidates: Vec<(i32, i32)> = Vec::with_capacity(estimated_candidates);
     for rownum in 0..height {
-        // Get the slice of image_pixels corresponding to this row.
-        let row_pixels: &[u8] = &image_pixels.as_slice()
-            [rownum * width .. (rownum+1) * width];
+        scan_row(image, rownum, sigma_noise_2, sigma_noise_3, &mut xy_candidates);
+    }
 
-        // First pass: sample every cache line (64 bytes) to estimate row minimum.
-        let mut row_min = 255u8;
-        for i in (0..row_pixels.len()).step_by(64) {
-            row_min = row_min.min(row_pixels[i]);
-        }
-        let threshold = row_min.saturating_add(sigma_noise_2 as u8 / 2);
-
-        for center_x in 3..(row_pixels.len()-3) {
-            let center_pixel = row_pixels[center_x];
-            if center_pixel >= threshold {
-                let gate = &row_pixels[center_x-3..center_x+4];
-                let result_type = gate_star_1d(gate, sigma_noise_2, sigma_noise_3);
-                if result_type == ResultType::Candidate {
-                    candidates.push(CandidateFrom1D{x: center_x as i32,
-                                                    y: rownum as i32});
-                }
-            }
-        }
-    }  // Iterate over rows.
+    let candidates: Vec<CandidateFrom1D> = xy_candidates
+        .into_iter()
+        .map(|(x, y)| CandidateFrom1D { x, y })
+        .collect();
 
     debug!("Image scan found {} candidates in {:?}",
            candidates.len(), row_scan_start.elapsed());

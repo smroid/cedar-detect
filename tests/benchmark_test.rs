@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 
 use image::ImageReader;
 use cedar_detect::algorithm::{estimate_noise_from_image, get_stars_from_image};
+use cedar_detect::image_funcs::set_row_scanner;
+use hopper_server::image_funcs::scan_row_neon;
 
 #[test]
 fn benchmark_detection_all_images() {
@@ -24,8 +26,10 @@ fn benchmark_detection_all_images() {
     // Algorithm parameters matching the defaults from test_cedar_detect.rs
     let sigma = 8.0;
     let binning = 2;
-    let hot_pixels = true;
+    let hot_pixels = false;
     let iterations = 1000;
+
+    set_row_scanner(scan_row_neon);
 
     println!("============================================================");
     println!("Starting benchmark for {} iterations per image...", iterations);

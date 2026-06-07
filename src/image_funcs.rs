@@ -7,11 +7,30 @@ use std::sync::OnceLock;
 
 pub type Bin2x2Fn = fn(&GrayImage) -> GrayImage;
 
+// Scans one row of `image` for star candidates and appends (x, y) pairs to
+// `candidates`. `rownum` is the row index. `sigma_noise_2` and `sigma_noise_3`
+// are precomputed thresholds passed from scan_image_for_candidates().
+pub type ScanRowFn = fn(image: &GrayImage,
+                        rownum: usize,
+                        sigma_noise_2: i16,
+                        sigma_noise_3: i16,
+                        candidates: &mut Vec<(i32, i32)>);
+
 static BIN2X2_FN: OnceLock<Bin2x2Fn> = OnceLock::new();
+static SCAN_ROW_FN: OnceLock<ScanRowFn> = OnceLock::new();
 
 pub fn set_binner(bin2x2: Bin2x2Fn) {
     log::info!("Setting image binning function.");
     let _ = BIN2X2_FN.set(bin2x2); // Ignores error if already set.
+}
+
+pub fn set_row_scanner(scan_row: ScanRowFn) {
+    log::info!("Setting row scanner function.");
+    let _ = SCAN_ROW_FN.set(scan_row); // Ignores error if already set.
+}
+
+pub fn get_row_scanner() -> Option<ScanRowFn> {
+    SCAN_ROW_FN.get().copied()
 }
 
 pub fn bin_2x2(image: &GrayImage) -> GrayImage {
