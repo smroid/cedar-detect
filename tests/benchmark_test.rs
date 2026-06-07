@@ -67,7 +67,7 @@ fn benchmark_detection_all_images() {
             let noise_estimate = estimate_noise_from_image(&img_u8);
 
             // Core star detection algorithm
-            let (stars, _, _, _) = get_stars_from_image(
+            let (stars, _, _) = get_stars_from_image(
                 &img_u8,
                 noise_estimate,
                 sigma,

@@ -128,7 +128,7 @@ use log::{debug};
 use crate::histogram_funcs::{HistogramStats,
                              remove_stars_from_histogram,
                              stats_for_histogram};
-use crate::image_funcs::bin_and_histogram_2x2;
+use crate::image_funcs::bin_2x2;
 
 // Compare two floats, treating NaN as equal to other values. This allows sorting
 // and comparison operations to complete without panicking if NaN values are
@@ -333,19 +333,13 @@ struct CandidateFrom1D {
 // `sigma` Specifies the multiple of the noise level by which a pixel must exceed
 //     the background to be considered a star candidate, in addition to
 //     satisfying other criteria.
-// `compute_histogram` Specifies whether histogram should be computed.
 // Returns:
 // Vec<CandidateFrom1D>: the identifed star candidates, in raster scan order.
-// Option([u32; 256]): if requested, the histogram of the `image` pixel values.
-//   Excludes the few leftmost and rightmost columns.
 fn scan_image_for_candidates(image: &GrayImage,
                              noise_estimate: f64,
-                             sigma: f64,
-                             compute_histogram: bool)
-                             -> (Vec<CandidateFrom1D>, Option<[u32; 256]>)
+                             sigma: f64)
+                             -> Vec<CandidateFrom1D>
 {
-    let mut histogram = [0_u32; 256];
-
     let row_scan_start = Instant::now();
     let width = image.dimensions().0 as usize;
     let height = image.dimensions().1 as usize;
@@ -368,33 +362,14 @@ fn scan_image_for_candidates(image: &GrayImage,
         }
         let threshold = row_min.saturating_add(sigma_noise_2 as u8 / 2);
 
-        // Second pass: pixel loop, only create gates when needed.
-        if compute_histogram {
-            for center_x in 3..(row_pixels.len()-3) {
-                let center_pixel = row_pixels[center_x];
-                histogram[center_pixel as usize] += 1;
-                if center_pixel >= threshold {
-                    let gate = &row_pixels[center_x-3..center_x+4];
-                    let result_type = gate_star_1d(
-                        gate, sigma_noise_2, sigma_noise_3);
-                    if result_type == ResultType::Candidate {
-                        candidates.push(CandidateFrom1D{x: center_x as i32,
-                                                        y: rownum as i32});
-                    }
-                }
-            }
-        } else {
-            // Identical except omits histogram update.
-            for center_x in 3..(row_pixels.len()-3) {
-                let center_pixel = row_pixels[center_x];
-                if center_pixel >= threshold {
-                    let gate = &row_pixels[center_x-3..center_x+4];
-                    let result_type = gate_star_1d(
-                        gate, sigma_noise_2, sigma_noise_3);
-                    if result_type == ResultType::Candidate {
-                        candidates.push(CandidateFrom1D{x: center_x as i32,
-                                                        y: rownum as i32});
-                    }
+        for center_x in 3..(row_pixels.len()-3) {
+            let center_pixel = row_pixels[center_x];
+            if center_pixel >= threshold {
+                let gate = &row_pixels[center_x-3..center_x+4];
+                let result_type = gate_star_1d(gate, sigma_noise_2, sigma_noise_3);
+                if result_type == ResultType::Candidate {
+                    candidates.push(CandidateFrom1D{x: center_x as i32,
+                                                    y: rownum as i32});
                 }
             }
         }
@@ -402,7 +377,7 @@ fn scan_image_for_candidates(image: &GrayImage,
 
     debug!("Image scan found {} candidates in {:?}",
            candidates.len(), row_scan_start.elapsed());
-    (candidates, if compute_histogram {Some(histogram)} else {None} )
+    candidates
 }
 
 #[derive(Debug)]
@@ -956,10 +931,6 @@ fn stats_for_roi(image: &GrayImage, roi: &Rect) -> HistogramStats {
 ///
 /// Option<GrayImage>: if `return_binned_image` is true, the 2x2 binning of
 ///   `image` is returned.
-///
-/// [u32; 256]: histogram of the `image` pixel values. Excludes the few leftmost
-///   and rightmost columns. If `return_binned_image`, the histogram is over
-///   that image rather than the input `image`.
 pub fn get_stars_from_image(image: &GrayImage,
                             noise_estimate: f64,
                             sigma: f64,
@@ -968,8 +939,7 @@ pub fn get_stars_from_image(image: &GrayImage,
                             return_binned_image: bool)
                             -> (Vec<StarDescription>,
                                 /*hot_pixel_count*/i32,
-                                Option<GrayImage>,
-                                [u32; 256])
+                                Option<GrayImage>)
 {
     match binning {
         1 => {
@@ -1000,9 +970,8 @@ pub fn get_stars_from_image(image: &GrayImage,
     let max_size = image.dimensions().0 / 100;
 
     if binning == 1 {
-        let (candidates_1d, histogram) =
-            scan_image_for_candidates(image, noise_estimate, sigma,
-                                      /*compute_histogram=*/true);
+        let candidates_1d =
+            scan_image_for_candidates(image, noise_estimate, sigma);
         let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate + 0.5) as i16, 2);
         let mut filtered_candidates = Vec::<CandidateFrom1D>::new();
         let mut max_y = 0usize;
@@ -1031,15 +1000,11 @@ pub fn get_stars_from_image(image: &GrayImage,
         stars.sort_by(|a, b| compare_floats(&b.brightness, &a.brightness));
 
         debug!("Star detection completed in {:?}", start.elapsed());
-        return (stars, hot_pixel_count, None,
-                histogram.expect("histogram should be Some since compute_histogram=true"));
+        return (stars, hot_pixel_count, None);
     }
 
     // We are binning by 2x, 4x, or 8x.
-    let (binned_2x, histogram_2x) = {
-        let r = bin_and_histogram_2x2(image);
-        (r.binned, r.histogram)
-    };
+    let binned_2x = bin_2x2(image);
     // higher_res_image: one binning level below detect_image, used for
     // centroiding.
     let higher_res_image: &GrayImage;
@@ -1050,15 +1015,13 @@ pub fn get_stars_from_image(image: &GrayImage,
         detect_image = &binned_2x;
         higher_res_image = image;
     } else {
-        let bin_result = bin_and_histogram_2x2(&binned_2x);
-        binned_4x = bin_result.binned;
+        binned_4x = bin_2x2(&binned_2x);
         if binning == 4 {
             detect_image = &binned_4x;
             higher_res_image = &binned_2x;
         } else {
             // binning == 8
-            let bin_result = bin_and_histogram_2x2(&binned_4x);
-            binned_8x = bin_result.binned;
+            binned_8x = bin_2x2(&binned_4x);
             detect_image = &binned_8x;
             higher_res_image = &binned_4x;
         }
@@ -1071,9 +1034,8 @@ pub fn get_stars_from_image(image: &GrayImage,
 
     let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate_binned + 0.5) as i16, 2);
 
-    let (candidates_1d, _) =
-        scan_image_for_candidates(&detect_image, noise_estimate_binned, sigma,
-                                  /*compute_histogram=*/false);
+    let candidates_1d =
+        scan_image_for_candidates(&detect_image, noise_estimate_binned, sigma);
     let mut filtered_candidates = Vec::<CandidateFrom1D>::new();
     let mut max_y = 0usize;
     for cand in candidates_1d {
@@ -1099,7 +1061,7 @@ pub fn get_stars_from_image(image: &GrayImage,
     stars.sort_by(|a, b| compare_floats(&b.brightness, &a.brightness));
 
     debug!("Star detection completed in {:?}", detect_start.elapsed());
-    (stars, hot_pixel_count, Some(binned_2x), histogram_2x)
+    (stars, hot_pixel_count, Some(binned_2x))
 }
 
 // Given a star candidate in a (possibly) binned image, see if any pixel(s) in
