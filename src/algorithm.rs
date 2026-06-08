@@ -753,15 +753,19 @@ fn gate_star_2d(
             compute_brightness(higher_res_image, &higher_res_margin);
         (x, y) = compute_peak_coord(higher_res_image, &higher_res_margin);
         let upsample = (binning / 2) as f64;
-        x *= upsample;
-        y *= upsample;
+        // Apply the +0.5 pixel-center offset in higher-res space before
+        // upsampling, so the offset scales correctly to captured-image space.
+        x = (x + 0.5) * upsample;
+        y = (y + 0.5) * upsample;
     } else {
         (brightness, num_saturated, peak_value) =
             compute_brightness(image, &margin);
         (x, y) = compute_peak_coord(image, &margin);
+        x += 0.5;
+        y += 0.5;
     }
-    Some(StarDescription{centroid_x: x + 0.5,
-                         centroid_y: y + 0.5,
+    Some(StarDescription{centroid_x: x,
+                         centroid_y: y,
                          peak_value, brightness, num_saturated})
 }
 
