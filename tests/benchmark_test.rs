@@ -27,7 +27,7 @@ fn benchmark_detection_all_images() {
     let sigma = 8.0;
     let binning = 2;
     let hot_pixels = false;
-    let iterations = 1000;
+    let iterations = if cfg!(debug_assertions) { 10 } else { 1000 };
 
     set_row_scanner(scan_row_neon);
 
