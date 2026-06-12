@@ -3,9 +3,9 @@
 
 //! CedarDetect provides efficient and accurate detection of stars in sky images.
 //! Given an image, CedarDetect returns a list of detected star centroids expressed
-//! in image pixel coordinates. The input image may be the camera's native full
-//! resolution or may already be binned (e.g. 2x2 binned by the camera); centroid
-//! coordinates are always in the pixel space of whichever image is supplied.
+//! in image pixel coordinates. The input image should be the camera's native full
+//! resolution; centroid coordinates are always in the pixel space of whichever
+//! image is supplied.
 //!
 //! Features:
 //!
@@ -119,6 +119,7 @@
 //!   lens distortion corrections when doing astrometry (e.g. plate solving).
 
 use std::cmp;
+use std::sync::Arc;
 use std::time::Instant;
 
 use image::GrayImage;
@@ -494,8 +495,7 @@ fn form_blobs_from_candidates(candidates: Vec<CandidateFrom1D>, max_y: usize)
 pub struct StarDescription {
     /// Location of star centroid in the pixel space of the `image` argument
     /// passed to [get_stars_from_image()]. (0.5, 0.5) corresponds to the center
-    /// of that image's upper left pixel. If the camera already binned the image
-    /// before passing it in, these coordinates are in that binned space.
+    /// of that image's upper left pixel.
     pub centroid_x: f64,
     pub centroid_y: f64,
 
@@ -919,6 +919,9 @@ fn stats_for_roi(image: &GrayImage, roi: &Rect) -> HistogramStats {
 ///   `image` - The image to analyze. The entire image is scanned for stars,
 ///   excluding the three leftmost and three rightmost columns.
 ///
+///   `binned_image` - If provided, this is the 2x2 binning of `image`,
+///   supplied as an `Arc` to avoid copying.
+///
 ///   `noise_estimate` The noise level of `image`. This is typically the noise
 ///   level returned by [estimate_noise_from_image()].
 ///
@@ -932,13 +935,7 @@ fn stats_for_roi(image: &GrayImage, roi: &Rect) -> HistogramStats {
 ///   `binning` 1 (no binning), 2 (2x2 binning), 4 (4x4 binning), or 8 (8x8
 ///   binning). Specifies whether `image` should be additionally binned inside
 ///   this function prior to star detection. Note that the centroids of detected
-///   stars is always reported in the coordinate space of the input `image`
-///   (which may itself already be binned by the camera).
-///
-///   `detect_hot_pixels` If true isolated hot pixels are detected and not
-///   treated as stars. If false isolated hot pixels might be reported as stars.
-///   When true, the input `image` should be at full sensor resolution, so that
-///   we can best discriminate isolated hot pixels.
+///   stars is always reported in the coordinate space of the input `image`.
 ///
 ///   `return_binned_image` If true, the 2x2 binning of `image` is returned.
 ///   Invalid if `binning` is 1.
@@ -949,17 +946,18 @@ fn stats_for_roi(image: &GrayImage, roi: &Rect) -> HistogramStats {
 /// i32: The number of isolated hot pixels seen. See implementation for more
 ///   information about isolated hot pixels.
 ///
-/// Option<GrayImage>: if `return_binned_image` is true, the 2x2 binning of
-///   `image` is returned.
+/// Option<Arc<GrayImage>>: if `return_binned_image` is true, the 2x2 binning
+///   of `image` is returned. This will be `binned_image` if provided, otherwise
+///   a freshly computed binned image is returned.
 pub fn get_stars_from_image(image: &GrayImage,
+                            binned_image: Option<Arc<GrayImage>>,
                             noise_estimate: f64,
                             sigma: f64,
                             binning: u32,
-                            detect_hot_pixels: bool,
                             return_binned_image: bool)
                             -> (Vec<StarDescription>,
                                 /*hot_pixel_count*/i32,
-                                Option<GrayImage>)
+                                Option<Arc<GrayImage>>)
 {
     match binning {
         1 => {
@@ -996,11 +994,8 @@ pub fn get_stars_from_image(image: &GrayImage,
         let mut filtered_candidates = Vec::<CandidateFrom1D>::new();
         let mut max_y = 0usize;
         for cand in candidates_1d {
-            if !detect_hot_pixels {
-                max_y = max_y.max(cand.y as usize);
-                filtered_candidates.push(cand);
-            } else if all_bright_are_hot(image, cand.x, cand.y, binning,
-                                         sigma_noise_2) {
+            if all_bright_are_hot(image, cand.x, cand.y, binning,
+                                  sigma_noise_2) {
                 hot_pixel_count += 1;
             } else {
                 max_y = max_y.max(cand.y as usize);
@@ -1024,7 +1019,8 @@ pub fn get_stars_from_image(image: &GrayImage,
     }
 
     // We are binning by 2x, 4x, or 8x.
-    let binned_2x = bin_2x2(image);
+    let binned_2x: Arc<GrayImage> =
+        binned_image.unwrap_or_else(|| Arc::new(bin_2x2(image)));
     // higher_res_image: one binning level below detect_image, used for
     // centroiding.
     let higher_res_image: &GrayImage;
@@ -1059,11 +1055,8 @@ pub fn get_stars_from_image(image: &GrayImage,
     let mut filtered_candidates = Vec::<CandidateFrom1D>::new();
     let mut max_y = 0usize;
     for cand in candidates_1d {
-        if !detect_hot_pixels {
-            max_y = max_y.max(cand.y as usize);
-            filtered_candidates.push(cand);
-        } else if all_bright_are_hot(image, cand.x, cand.y, binning,
-                                     sigma_noise_2)  {
+        if all_bright_are_hot(image, cand.x, cand.y, binning,
+                              sigma_noise_2) {
             hot_pixel_count += 1;
         } else {
             max_y = max_y.max(cand.y as usize);
@@ -1243,8 +1236,9 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
             if val >= peak_val {
                 // See if this is a hot pixel.
                 if pixel_type == PixelHotType::Hot {
-                    // Hot pixel can't be peak. Substitute its value for the
-                    // histogram.
+                    // Hot pixel can't be peak. classify_pixel already substituted
+                    // the interpolated neighbor average into val; fall through to
+                    // add that to the histogram.
                 } else {
                     let center_dist_sq =
                         (center_x - roi_center_x) * (center_x - roi_center_x) +

@@ -36,10 +36,6 @@ struct Args {
     #[arg(short, long, default_value_t = 2)]
     binning: u32,
 
-    /// Whether hot pixels should be detected.
-    #[arg(long, default_value_t = false)]
-    hot_pixels: std::primitive::bool,
-
     /// Output list of star centroids.
     #[arg(short, long, default_value_t = false)]
     coords: std::primitive::bool,
@@ -102,8 +98,8 @@ fn process_file(file: &str, args: &Args) -> (usize, Duration) {
     let background_estimate = estimate_background_from_image_region(
         &img_u8, &Rect::at(0, 0).of_size(100, 100)).0;
     let (stars, _, _) = get_stars_from_image(
-        &img_u8, noise_estimate, args.sigma,
-        args.binning, args.hot_pixels, /*return_binned_image=*/false);
+        &img_u8, None, noise_estimate, args.sigma,
+        args.binning, /*return_binned_image=*/false);
     let elapsed = star_extraction_start.elapsed();
     info!("WxH: {}x{}; noise level {} background {}",
           width, height, noise_estimate, background_estimate);

@@ -26,7 +26,6 @@ fn benchmark_detection_all_images() {
     // Algorithm parameters matching the defaults from test_cedar_detect.rs
     let sigma = 8.0;
     let binning = 2;
-    let hot_pixels = false;
     let iterations = if cfg!(debug_assertions) { 10 } else { 1000 };
 
     set_row_scanner(scan_row_neon);
@@ -73,11 +72,11 @@ fn benchmark_detection_all_images() {
             // Core star detection algorithm
             let (stars, _, _) = get_stars_from_image(
                 &img_u8,
+                None,
                 noise_estimate,
                 sigma,
                 binning,
-                hot_pixels,
-                false // return_binned_image
+                /*return_binned_image=*/false
             );
 
             // Accumulate only the execution time
