@@ -29,23 +29,18 @@ message CentroidsRequest {
 
   int32 max_size = 3 [deprecated=true];
 
-  // Values: 2 or 4 (or omitted). If `return_binned` or
-  // `use_binned_for_star_candidates`, this controls whether 2x2 binning is used
-  // (default), or 4x4 binning is used.
+  // The `binning` argument to get_stars_from_image(): 1, 2, 4, or 8. Only
+  // relevant if `use_binned_for_star_candidates`; defaults to 2 if omitted.
   optional int32 binning = 8;
 
-  // If true, in addition to identifying star candidates, the CedarDetect algorithm
-  // should also return a 2x2 or 4x4 binning of `input_image`, with hot pixels
-  // eliminated.
+  // Ignored. The binned image is always returned when binning is applied.
   bool return_binned = 4;
 
-  // If true, a 2x2 or 4x4 binning of `input_image` is created internaly to
+  // If true, a 2x2 or 4x4 binning of `input_image` is used internally to
   // identify star candidates instead of using the full-res `input_image`. This
-  // is useful for situations where the `input_image` pixels are greatly
-  // oversampling the spatial resolution, or a poor quality lens is used; in
-  // other words stars are not tightly focused to ~2 pixels FWHM.
-  // Note that centroid positions are reported in full-res `input_image`
-  // coordinates even if the binned image is the source of candidates.
+  // is useful when `input_image` pixels greatly oversample the spatial
+  // resolution (stars not tightly focused to ~2 pixels FWHM).
+  // Centroid positions are always reported in full-res `input_image` coordinates.
   bool use_binned_for_star_candidates = 5;
 
   // Ignored.
@@ -74,8 +69,8 @@ message CentroidsResult {
   // Estimated background level of the request's `estimate_background_region`.
   optional double background_estimate = 7;
 
-  // The number of hot pixels seen. See algorithm implementation for more
-  // information about hot pixels.
+  // The number of isolated hot pixels detected. Hot pixels are bright
+  // single-pixel spikes excluded from star candidates.
   int32 hot_pixel_count = 2;
 
   // The peak pixel value of the identified star candidates. This might be an average
@@ -86,7 +81,8 @@ message CentroidsResult {
   // brightness first.
   repeated StarCentroid star_candidates = 3;
 
-  // If `return_binned` is present the request, this is the result.
+  // The 2x2 binning of `input_image`. Present when binning was applied
+  // (i.e. `use_binned_for_star_candidates`).
   optional Image binned_image = 4;
 
   // The time spent in the CedarDetect algorithm. The client can subtract this from

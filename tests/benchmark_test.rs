@@ -76,7 +76,6 @@ fn benchmark_detection_all_images() {
                 noise_estimate,
                 sigma,
                 binning,
-                /*return_binned_image=*/false
             );
 
             // Accumulate only the execution time

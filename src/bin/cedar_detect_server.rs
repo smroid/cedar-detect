@@ -128,7 +128,7 @@ impl CedarDetect for MyCedarDetect {
                                 input_image.image_data).unwrap()
         };
 
-        let binning = if req.use_binned_for_star_candidates || req.return_binned {
+        let binning = if req.use_binned_for_star_candidates {
             match req.binning {
                 None => 2,
                 Some(2) => 2,
@@ -143,9 +143,9 @@ impl CedarDetect for MyCedarDetect {
         };
 
         let noise_estimate = estimate_noise_from_image(&req_image);
-        let (stars, hot_pixel_count, binned_image) = get_stars_from_image(
+        let (stars, hot_pixels, binned_image) = get_stars_from_image(
             &req_image, None, noise_estimate, req.sigma,
-            binning, req.return_binned);
+            binning);
 
         let mut background_estimate: Option<f64> = None;
         if let Some(estimate_background_region) = req.estimate_background_region {
@@ -203,7 +203,7 @@ impl CedarDetect for MyCedarDetect {
         let response = cedar_detect::CentroidsResult{
             noise_estimate,
             background_estimate,
-            hot_pixel_count,
+            hot_pixel_count: hot_pixels.len() as i32,
             peak_star_pixel: if num_peak > 0 { sum_peak / num_peak } else { 255 },
             star_candidates: candidates,
             binned_image: binned_image.map(|bimg| cedar_detect::Image {

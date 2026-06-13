@@ -124,7 +124,7 @@ use std::time::Instant;
 
 use image::GrayImage;
 use imageproc::rect::Rect;
-use log::{debug};
+use log::{debug, warn};
 
 use crate::histogram_funcs::{HistogramStats,
                              remove_stars_from_histogram,
@@ -488,6 +488,17 @@ fn form_blobs_from_candidates(candidates: Vec<CandidateFrom1D>, max_y: usize)
     }
     debug!("Found {} blobs in {:?}", non_empty_blobs.len(), blobs_start.elapsed());
     non_empty_blobs
+}
+
+/// An isolated hot pixel detected by [get_stars_from_image()].
+#[derive(Debug, Copy, Clone)]
+pub struct HotPixel {
+    /// Location in the pixel space of the `image` argument passed to
+    /// [get_stars_from_image()].
+    pub x: u32,
+    pub y: u32,
+    /// Interpolated neighbor average substituted for the hot pixel value.
+    pub replacement_value: u8,
 }
 
 /// Summarizes a star-like spot found by [get_stars_from_image()].
@@ -937,35 +948,26 @@ fn stats_for_roi(image: &GrayImage, roi: &Rect) -> HistogramStats {
 ///   this function prior to star detection. Note that the centroids of detected
 ///   stars is always reported in the coordinate space of the input `image`.
 ///
-///   `return_binned_image` If true, the 2x2 binning of `image` is returned.
-///   Invalid if `binning` is 1.
-///
 /// # Returns
 /// Vec<[StarDescription]>, in order of descending estimated brightness.
 ///
-/// i32: The number of isolated hot pixels seen. See implementation for more
-///   information about isolated hot pixels.
+/// Vec<[HotPixel]>: the isolated hot pixels detected, each with its image
+///   coordinates and interpolated replacement value.
 ///
-/// Option<Arc<GrayImage>>: if `return_binned_image` is true, the 2x2 binning
-///   of `image` is returned. This will be `binned_image` if provided, otherwise
-///   a freshly computed binned image is returned.
+/// Option<Arc<GrayImage>>: the 2x2 binning of `image` when `binning` > 1,
+///   otherwise None. This will be `binned_image` if provided, otherwise a
+///   freshly computed binned image.
 pub fn get_stars_from_image(image: &GrayImage,
                             binned_image: Option<Arc<GrayImage>>,
                             noise_estimate: f64,
                             sigma: f64,
-                            binning: u32,
-                            return_binned_image: bool)
+                            binning: u32)
                             -> (Vec<StarDescription>,
-                                /*hot_pixel_count*/i32,
+                                Vec<HotPixel>,
                                 Option<Arc<GrayImage>>)
 {
     match binning {
-        1 => {
-            if return_binned_image {
-                panic!("cannot 'return_binned_image' when binning==1");
-            }
-        },
-        2 | 4 | 8 => (),
+        1 | 2 | 4 | 8 => (),
         _ => {
             panic!("Invalid binning argument {}, must be 1, 2, 4, or 8", binning);
         }
@@ -979,7 +981,7 @@ pub fn get_stars_from_image(image: &GrayImage,
     let noise_estimate = f64::max(noise_estimate, noise_floor);
 
     let mut stars = Vec::<StarDescription>::new();
-    let mut hot_pixel_count = 0_i32;
+    let mut hot_pixels = Vec::<HotPixel>::new();
 
     // CedarDetect clumps adjacent bright pixels to form a single star
     // candidate. The `max_size` value governs how large a clump can be before
@@ -995,8 +997,8 @@ pub fn get_stars_from_image(image: &GrayImage,
         let mut max_y = 0usize;
         for cand in candidates_1d {
             if all_bright_are_hot(image, cand.x, cand.y, binning,
-                                  sigma_noise_2) {
-                hot_pixel_count += 1;
+                                  sigma_noise_2, &mut hot_pixels) {
+                // Discard candidate.
             } else {
                 max_y = max_y.max(cand.y as usize);
                 filtered_candidates.push(cand);
@@ -1015,7 +1017,7 @@ pub fn get_stars_from_image(image: &GrayImage,
         stars.sort_by(|a, b| compare_floats(&b.brightness, &a.brightness));
 
         debug!("Star detection completed in {:?}", start.elapsed());
-        return (stars, hot_pixel_count, None);
+        return (stars, hot_pixels, None);
     }
 
     // We are binning by 2x, 4x, or 8x.
@@ -1056,8 +1058,8 @@ pub fn get_stars_from_image(image: &GrayImage,
     let mut max_y = 0usize;
     for cand in candidates_1d {
         if all_bright_are_hot(image, cand.x, cand.y, binning,
-                              sigma_noise_2) {
-            hot_pixel_count += 1;
+                              sigma_noise_2, &mut hot_pixels) {
+            // candidate discarded; hot pixels already collected above
         } else {
             max_y = max_y.max(cand.y as usize);
             filtered_candidates.push(cand);
@@ -1074,15 +1076,16 @@ pub fn get_stars_from_image(image: &GrayImage,
     stars.sort_by(|a, b| compare_floats(&b.brightness, &a.brightness));
 
     debug!("Star detection completed in {:?}", detect_start.elapsed());
-    (stars, hot_pixel_count, Some(binned_2x))
+    (stars, hot_pixels, Some(binned_2x))
 }
 
 // Given a star candidate in a (possibly) binned image, see if any pixel(s) in
 // the full resolution image contribute to the star candidate are non-hot
-// bright.
+// bright. Pushes any hot sub-pixels into `hot_pixels`.
 fn all_bright_are_hot(full_res_image: &GrayImage,
                       x: i32, y: i32, binning: u32,
-                      sigma_noise_2: i16) -> bool {
+                      sigma_noise_2: i16,
+                      hot_pixels: &mut Vec<HotPixel>) -> bool {
     let width = full_res_image.dimensions().0 as i32;
     let image_pixels: &Vec<u8> = full_res_image.as_raw();
 
@@ -1090,6 +1093,8 @@ fn all_bright_are_hot(full_res_image: &GrayImage,
     let x_full = x * binning as i32;
     let y_full = y * binning as i32;
 
+    let mut has_bright = false;
+    let mut has_hot = false;
     // Process all of the pixels in the full_res_image that contribute
     // to the (binned) x/y pixel.
     for yi in 0..binning {
@@ -1104,14 +1109,29 @@ fn all_bright_are_hot(full_res_image: &GrayImage,
             let start_x = backing_x - 3;
             let end_x = backing_x + 4;
             let gate = &row_pixels[start_x as usize .. end_x as usize];
-            let (pixel_type, _) = classify_pixel(gate, sigma_noise_2);
-            if pixel_type == PixelHotType::Bright {
-                return false;
+            let (pixel_type, val) = classify_pixel(gate, sigma_noise_2);
+            match pixel_type {
+                PixelHotType::Bright => { has_bright = true; }
+                PixelHotType::Hot => {
+                    has_hot = true;
+                    hot_pixels.push(HotPixel {
+                        x: backing_x as u32,
+                        y: backing_y as u32,
+                        replacement_value: val,
+                    });
+                }
+                PixelHotType::Dark => {}
             }
         }
     }
-    // All pixels are dark or hot.
-    true
+    // scan_image_for_candidates only emits candidates where at least one pixel
+    // exceeded the sigma threshold, so every candidate must have at least one
+    // Bright or Hot pixel.
+    if !has_hot && !has_bright {
+        warn!("Candidate at ({}, {}) has no bright or hot pixels; \
+               unexpected from scan_image_for_candidates", x, y);
+    }
+    !has_bright  // true: all non-dark pixels are hot
 }
 
 #[derive(Debug, Eq, PartialEq)]

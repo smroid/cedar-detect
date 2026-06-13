@@ -99,7 +99,7 @@ fn process_file(file: &str, args: &Args) -> (usize, Duration) {
         &img_u8, &Rect::at(0, 0).of_size(100, 100)).0;
     let (stars, _, _) = get_stars_from_image(
         &img_u8, None, noise_estimate, args.sigma,
-        args.binning, /*return_binned_image=*/false);
+        args.binning);
     let elapsed = star_extraction_start.elapsed();
     info!("WxH: {}x{}; noise level {} background {}",
           width, height, noise_estimate, background_estimate);
