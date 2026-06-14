@@ -124,7 +124,7 @@ use std::time::Instant;
 
 use image::GrayImage;
 use imageproc::rect::Rect;
-use log::{debug, warn};
+use log::debug;
 
 use crate::histogram_funcs::{HistogramStats,
                              remove_stars_from_histogram,
