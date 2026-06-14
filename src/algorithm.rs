@@ -979,6 +979,7 @@ pub fn get_stars_from_image(image: &GrayImage,
     // has been crushed to black; use a minimum noise value.
     let noise_floor = 0.2;
     let noise_estimate = f64::max(noise_estimate, noise_floor);
+    let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate + 0.5) as i16, 2);
 
     let mut stars = Vec::<StarDescription>::new();
     let mut hot_pixels = Vec::<HotPixel>::new();
@@ -992,7 +993,6 @@ pub fn get_stars_from_image(image: &GrayImage,
     if binning == 1 {
         let candidates_1d =
             scan_image_for_candidates(image, noise_estimate, sigma);
-        let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate + 0.5) as i16, 2);
         let mut filtered_candidates = Vec::<CandidateFrom1D>::new();
         let mut max_y = 0usize;
         for cand in candidates_1d {
@@ -1049,8 +1049,6 @@ pub fn get_stars_from_image(image: &GrayImage,
 
     debug!("Image preprocessing completed in {:?}", start.elapsed());
     let detect_start = Instant::now();
-
-    let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate_binned + 0.5) as i16, 2);
 
     let candidates_1d =
         scan_image_for_candidates(&detect_image, noise_estimate_binned, sigma);
@@ -1124,14 +1122,8 @@ fn all_bright_are_hot(full_res_image: &GrayImage,
             }
         }
     }
-    // scan_image_for_candidates only emits candidates where at least one pixel
-    // exceeded the sigma threshold, so every candidate must have at least one
-    // Bright or Hot pixel.
-    if !has_hot && !has_bright {
-        warn!("Candidate at ({}, {}) has no bright or hot pixels; \
-               unexpected from scan_image_for_candidates", x, y);
-    }
-    !has_bright  // true: all non-dark pixels are hot
+
+    has_hot && !has_bright
 }
 
 #[derive(Debug, Eq, PartialEq)]
