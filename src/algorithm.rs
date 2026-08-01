@@ -94,8 +94,8 @@
 //!
 //! ## Centroid estimation
 //!
-//! CedarDetect's computes a sub-pixel centroid position for each detected star
-//! using quadratic interpolation of the peak and its neighbors. This suffices
+//! CedarDetect computes a sub-pixel centroid position for each detected star
+//! as the flux-weighted center of gravity of the star's pixels. This suffices
 //! for many purposes, but a more exacting application might want to do its own
 //! centroiding:
 //!
@@ -571,13 +571,17 @@ pub struct StarDescription {
 //     we arrange to do centroiding on the higher resolution image.
 //
 // binning: 1 (no binning), 2, 4, or 8.
+//
+// noise_estimate: the noise level of `image`.
+//
+// higher_res_noise_estimate: the noise level of `higher_res_image`.
 
 fn gate_star_2d(
     blob: &Blob,
     image: &GrayImage,
     higher_res_image: &GrayImage,
     binning: u32,
-    noise_estimate: f64, sigma: f64,
+    noise_estimate: f64, higher_res_noise_estimate: f64, sigma: f64,
     max_width: u32, max_height: u32) -> Option<StarDescription>
 {
     let (image_width, image_height) = image.dimensions();
@@ -762,7 +766,8 @@ fn gate_star_2d(
             Rect::at(left as i32, top as i32).of_size(adj_width, adj_height);
         (brightness, num_saturated, peak_value) =
             compute_brightness(higher_res_image, &higher_res_margin);
-        (x, y) = compute_peak_coord(higher_res_image, &higher_res_margin);
+        (x, y) = compute_centroid(higher_res_image, &higher_res_margin,
+                                  higher_res_noise_estimate);
         let upsample = (binning / 2) as f64;
         // Apply the +0.5 pixel-center offset in higher-res space before
         // upsampling, so the offset scales correctly to captured-image space.
@@ -771,7 +776,7 @@ fn gate_star_2d(
     } else {
         (brightness, num_saturated, peak_value) =
             compute_brightness(image, &margin);
-        (x, y) = compute_peak_coord(image, &margin);
+        (x, y) = compute_centroid(image, &margin, noise_estimate);
         x += 0.5;
         y += 0.5;
     }
@@ -812,62 +817,50 @@ fn compute_brightness(image: &GrayImage, bounding_box: &Rect) -> (f64, u16, u8) 
     (f64::max(sum, 0.0), num_saturated, peak_value)
 }
 
-// Computes the position of the peak, with sub-pixel interpolation.
-fn compute_peak_coord(image: &GrayImage, bounding_box: &Rect) -> (f64, f64) {
-    let mut horizontal_projection = vec![0u32; bounding_box.width() as usize];
-    let mut vertical_projection = vec![0u32; bounding_box.height() as usize];
-    let x0 = bounding_box.left();
-    let y0 = bounding_box.top();
-    for_each_pixel_in_roi(image, bounding_box, |x, y, pixel_value| {
-        horizontal_projection[(x - x0) as usize] += pixel_value as u32;
-        vertical_projection[(y - y0) as usize] += pixel_value as u32;
+// Computes the flux-weighted centroid of the star within `bounding_box`, at
+// sub-pixel resolution.
+//
+// The perimeter of `bounding_box` is taken to represent the local sky
+// background; that mean plus a multiple of `noise_estimate` defines a soft
+// threshold. Each pixel then contributes weight max(value - threshold, 0),
+// so background pixels contribute little or nothing while the star's profile
+// contributes in proportion to its flux above the sky.
+//
+// The returned coordinates use the same "pixel index" convention as the
+// input box: an integer value j denotes the center of pixel j. Callers add
+// 0.5 to reach the continuous convention in which pixel j spans [j, j+1).
+fn compute_centroid(image: &GrayImage, bounding_box: &Rect,
+                    noise_estimate: f64) -> (f64, f64) {
+    // Soft threshold above the background, in units of the noise. This
+    // suppresses the noise pedestal that would otherwise pull the centroid
+    // toward the center of `bounding_box`.
+    const THRESHOLD_SIGMA: f64 = 1.0;
+
+    let mut boundary_sum: f64 = 0.0;
+    let mut boundary_count: f64 = 0.0;
+    for_each_perimeter_pixel(image, bounding_box, |_x, _y, pixel_value| {
+        boundary_sum += pixel_value as f64;
+        boundary_count += 1.0;
     });
-    let peak_x = x0 as f64 + peak_coord_1d(horizontal_projection);
-    let peak_y = y0 as f64 + peak_coord_1d(vertical_projection);
-    (peak_x, peak_y)
-}
+    let background_est = boundary_sum / boundary_count;
+    let threshold = background_est + THRESHOLD_SIGMA * noise_estimate;
 
-fn peak_coord_1d(values: Vec<u32>) -> f64 {
-    // We want a single peak value with lesser neighbors.
-    let mut peak_val = 0;
-    let mut peak_ind = 0;
-    let mut in_run = false;
-    let mut peak_run_length = 0;
-    for (ind, val) in values.iter().enumerate() {
-        if *val > peak_val || ind == 0 {
-            peak_val = *val;
-            peak_ind = ind;
-            peak_run_length = 1;
-            in_run = true;
-        } else if *val == peak_val {
-            if in_run {
-                peak_run_length += 1;
-            }
-        } else {
-            in_run = false;
-        }
+    let mut weight_sum = 0.0;
+    let mut weighted_x = 0.0;
+    let mut weighted_y = 0.0;
+    for_each_pixel_in_roi(image, bounding_box, |x, y, pixel_value| {
+        let weight = f64::max(pixel_value as f64 - threshold, 0.0);
+        weight_sum += weight;
+        weighted_x += weight * x as f64;
+        weighted_y += weight * y as f64;
+    });
+    if weight_sum <= 0.0 {
+        // Nothing rose above the threshold, so we have no information beyond
+        // the box itself; report its center.
+        return (bounding_box.left() as f64 + (bounding_box.width() - 1) as f64 / 2.0,
+                bounding_box.top() as f64 + (bounding_box.height() - 1) as f64 / 2.0);
     }
-
-    // If we have a run of equal-length values, just return the mid-coord of the
-    // run. Yuck.
-    if peak_run_length > 1 {
-        return peak_ind as f64 + (peak_run_length - 1) as f64 / 2.0;
-    }
-    // If our peak is at either end of the vector, just return its coord. Yuck.
-    if peak_ind == 0 || peak_ind == values.len() - 1 {
-        return peak_ind as f64;
-    }
-
-    // We have a peak with two lesser neighbors. Apply quadratic interpolation.
-    // https://ccrma.stanford.edu/~jos/sasp/Quadratic_Interpolation_Spectral_Peaks.html
-    let a = values[peak_ind - 1] as f64;
-    let b = values[peak_ind] as f64;
-    let c = values[peak_ind + 1] as f64;
-    let p = 0.5 * (a - c) / (a - 2.0 * b + c);
-    assert!(p >= -0.5);
-    assert!(p <= 0.5);
-
-    peak_ind as f64 + p
+    (weighted_x / weight_sum, weighted_y / weight_sum)
 }
 
 /// Estimates the RMS noise of the given image. A small portion of the image
@@ -884,19 +877,20 @@ pub fn estimate_noise_from_image(image: &GrayImage) -> f64 {
 
     // The IMX296mono camera on Raspberry Pi Zero 2 W has a noise problem that
     // causes some rows to differ in offset. We thus use horizontal cuts within
-    // a single row when estimating noise, to avoid possible between-row level
+    // a row when estimating noise, to avoid possible between-row level
     // variations.
     let cut_size = cmp::min(50, width / 4);
 
-    // Sample three areas across the horizontal midline of the image.
-    let mut stats_arr = [
-        stats_for_roi(image, &Rect::at(
-            (width/4 - cut_size/2) as i32, (height/2) as i32).of_size(cut_size, 1)),
-        stats_for_roi(image, &Rect::at(
-            (width*2/4 - cut_size/2) as i32, (height/2) as i32).of_size(cut_size, 1)),
-        stats_for_roi(image, &Rect::at(
-            (width*3/4 - cut_size/2) as i32, (height/2) as i32).of_size(cut_size, 1))
-    ];
+    // Sample three areas across each of three horizontal cuts of the image.
+    let mut stats_arr = Vec::with_capacity(9);
+    for vert in 1..=3 {
+        let y = (height * vert / 4) as i32;
+        for horiz in 1..=3 {
+            let x = (width * horiz / 4 - cut_size/2) as i32;
+            stats_arr.push(
+                stats_for_roi(image, &Rect::at(x, y).of_size(cut_size, 1)));
+        }
+    }
     // Pick the darkest cut by mean value.
     stats_arr.sort_by(|a, b| compare_floats(&a.mean, &b.mean));
     let stddev = stats_arr[0].stddev;
@@ -1007,8 +1001,9 @@ pub fn get_stars_from_image(image: &GrayImage,
         for blob in form_blobs_from_candidates(filtered_candidates, max_y) {
             if let Some(x) = gate_star_2d(&blob, image,
                                /*higher_res_image=*/image,
-                               binning, noise_estimate, sigma,
-                               max_size, max_size) {
+                               binning, noise_estimate,
+                               /*higher_res_noise_estimate=*/noise_estimate,
+                               sigma, max_size, max_size) {
                 stars.push(x)
             }
         }
@@ -1027,11 +1022,18 @@ pub fn get_stars_from_image(image: &GrayImage,
     // centroiding.
     let higher_res_image: &GrayImage;
     let detect_image: &GrayImage;
+    // Noise level of `higher_res_image`, needed for centroiding. It is
+    // higher than the detection image's noise, as `higher_res_image` is one
+    // binning level less.
+    let higher_res_noise_estimate: f64;
     let binned_4x;   // must outlive borrows for binning==4/8
     let binned_8x;   // must outlive borrow for binning==8
     if binning == 2 {
         detect_image = &binned_2x;
         higher_res_image = image;
+        // higher_res_image is the original image, whose noise level the
+        // caller already gave us.
+        higher_res_noise_estimate = noise_estimate;
     } else {
         binned_4x = bin_2x2(&binned_2x);
         if binning == 4 {
@@ -1043,6 +1045,8 @@ pub fn get_stars_from_image(image: &GrayImage,
             detect_image = &binned_8x;
             higher_res_image = &binned_4x;
         }
+        higher_res_noise_estimate =
+            f64::max(estimate_noise_from_image(higher_res_image), noise_floor);
     }
     let noise_estimate_binned =
         f64::max(estimate_noise_from_image(&detect_image), noise_floor);
@@ -1066,7 +1070,8 @@ pub fn get_stars_from_image(image: &GrayImage,
     for blob in form_blobs_from_candidates(filtered_candidates, max_y) {
         if let Some(x) = gate_star_2d(&blob, &detect_image,
                            &higher_res_image,
-                           binning, noise_estimate_binned, sigma,
+                           binning, noise_estimate_binned,
+                           higher_res_noise_estimate, sigma,
                            max_size/binning + 1, max_size/binning + 1) { stars.push(x) }
     }
 
@@ -1280,7 +1285,7 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
 
     // Apply centroiding to get sub-pixel resolution for peak_x/y.
     let bounding_box = Rect::at(peak_x - 2, peak_y - 2).of_size(5, 5);
-    let (mut x, mut y) = compute_peak_coord(image, &bounding_box);
+    let (mut x, mut y) = compute_centroid(image, &bounding_box, noise_estimate);
     x += 0.5;
     y += 0.5;
     // Constrain x/y to be within ROI.
@@ -1660,18 +1665,18 @@ mod tests {
         blob.candidates.push(CandidateFrom1D{x: 3, y: 3});
         blob.candidates.push(CandidateFrom1D{x: 5, y: 5});
         // 3x3 is too big.
-        match gate_star_2d(&blob, &image_9x9, &image_9x9, 1, 1.0, 6.0,
+        match gate_star_2d(&blob, &image_9x9, &image_9x9, 1, 1.0, 1.0, 6.0,
                            /*max_width=*/3, /*max_height=*/2) {
             Some(_star_description) => panic!("Expected rejection"),
             None => ()
         }
-        match gate_star_2d(&blob, &image_9x9, &image_9x9, 1, 1.0, 6.0,
+        match gate_star_2d(&blob, &image_9x9, &image_9x9, 1, 1.0, 1.0, 6.0,
                            /*max_width=*/2, /*max_height=*/3) {
             Some(_star_description) => panic!("Expected rejection"),
             None => ()
         }
         // We allow a 3x3 blob here.
-        match gate_star_2d(&blob, &image_9x9, &image_9x9, 1, 1.0, 6.0,
+        match gate_star_2d(&blob, &image_9x9, &image_9x9, 1, 1.0, 1.0, 6.0,
                            /*max_width=*/3, /*max_height=*/3) {
             Some(_star_description) => (),
             None => panic!("Expected candidate")
@@ -1692,23 +1697,23 @@ mod tests {
         9,  9,  9,  9,  9,  9,  9);
         // Make 1x1 blob, but too far to the left.
         blob.candidates.push(CandidateFrom1D{x: 2, y: 3});
-        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
+        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
         // Too far to right.
         blob.candidates.clear();
         blob.candidates.push(CandidateFrom1D{x: 4, y: 3});
-        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
+        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
         // Too high.
         blob.candidates.clear();
         blob.candidates.push(CandidateFrom1D{x: 3, y: 2});
-        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
+        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
         // Too low.
         blob.candidates.clear();
         blob.candidates.push(CandidateFrom1D{x: 3, y: 4});
-        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
+        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
         // Just right!
         blob.candidates.clear();
         blob.candidates.push(CandidateFrom1D{x: 3, y: 3});
-        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) {
+        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 1.0, 6.0, 3, 3) {
             Some(_star_description) => (),
             None => panic!("Expected candidate"),
         }
@@ -1732,10 +1737,10 @@ mod tests {
         blob.candidates.push(CandidateFrom1D{x: 3, y: 3});
         blob.candidates.push(CandidateFrom1D{x: 5, y: 5});
         // Center of core is less bright than outer core.
-        if let Some(_star_description) = gate_star_2d(&blob, &image_9x9, &image_9x9, 1, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
+        if let Some(_star_description) = gate_star_2d(&blob, &image_9x9, &image_9x9, 1, 1.0, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
         // Make center bright enough.
         image_9x9.put_pixel(4, 4, Luma::<u8>([20]));
-        match gate_star_2d(&blob, &image_9x9, &image_9x9, 1, 1.0, 6.0, 3, 3) {
+        match gate_star_2d(&blob, &image_9x9, &image_9x9, 1, 1.0, 1.0, 6.0, 3, 3) {
             Some(_star_description) => (),
             None => panic!("Expected candidate"),
         }
@@ -1756,10 +1761,10 @@ mod tests {
         8,  8,  8,  8,  8,  8,  8);
         // 1x1 core is less bright than neighbor average. Note that the
         // neighbor corners are excluded.
-        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
+        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
         // Make center bright enough.
         image_7x7.put_pixel(3, 3, Luma::<u8>([14]));
-        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) {
+        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 1.0, 6.0, 3, 3) {
             Some(_star_description) => (),
             None => panic!("Expected candidate"),
         }
@@ -1779,10 +1784,10 @@ mod tests {
         8, 14, 14, 14, 14, 14,  8;
         8,  8,  8,  8,  8,  8,  8);
         // 1x1 core is not brighter than margin average.
-        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
+        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
         // Make center bright enough.
         image_7x7.put_pixel(3, 3, Luma::<u8>([15]));
-        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) {
+        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 1.0, 6.0, 3, 3) {
             Some(_star_description) => (),
             None => panic!("Expected candidate"),
         }
@@ -1802,10 +1807,10 @@ mod tests {
         9, 10, 10, 10, 10, 10,  9;
         9,  9,  9,  9,  9,  9,  9);
         // Perimeter has an anomalously bright pixel.
-        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
+        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
         // Repair the perimeter.
         image_7x7.put_pixel(0, 2, Luma::<u8>([12]));
-        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) {
+        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 1.0, 6.0, 3, 3) {
             Some(_star_description) => (),
             None => panic!("Expected candidate"),
         }
@@ -1825,45 +1830,60 @@ mod tests {
         8,  9,  9,  9,  9,  9,  8;
         8,  8,  8,  8,  8,  8,  8);
         // 1x1 core is not brighter enough than perimeter average.
-        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
+        if let Some(_star_description) = gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 1.0, 6.0, 3, 3) { panic!("Expected rejection") }
         // Make center bright enough.
         image_7x7.put_pixel(3, 3, Luma::<u8>([14]));
-        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 6.0, 3, 3) {
+        match gate_star_2d(&blob, &image_7x7, &image_7x7, 1, 1.0, 1.0, 6.0, 3, 3) {
             Some(_star_description) => (),
             None => panic!("Expected candidate"),
         }
     }
 
     #[test]
-    fn test_peak_coord_1d() {
-        // All zeroes.
-        let values = vec![0, 0, 0, 0, 0];
-        assert_eq!(peak_coord_1d(values), 2.0);
+    fn test_compute_centroid() {
+        let bounding_box = Rect::at(1, 1).of_size(5, 5);
 
-        // All same value.
-        let values = vec![10, 10, 10, 10, 10];
-        assert_eq!(peak_coord_1d(values), 2.0);
+        // Symmetric star centered on pixel (3, 3). Centroid is that pixel's
+        // index; callers add 0.5 to reach continuous coords.
+        let image_7x7 = gray_image!(
+            9,  9,  9,  9,  9,  9,  9;
+            9, 10, 10, 10, 10, 10,  9;
+            9, 10, 20, 40, 20, 10,  9;
+            9, 10, 40, 80, 40, 10,  9;
+            9, 10, 20, 40, 20, 10,  9;
+            9, 10, 10, 10, 10, 10,  9;
+            9,  9,  9,  9,  9,  9,  9);
+        let (x, y) = compute_centroid(&image_7x7, &bounding_box, 1.0);
+        assert_abs_diff_eq!(x, 3.0, epsilon = 0.01);
+        assert_abs_diff_eq!(y, 3.0, epsilon = 0.01);
 
-        // Run of two peak values. Disjoint peak value later in vector
-        // does not extend the run.
-        let values = vec![1, 2, 2, 1, 2];
-        assert_eq!(peak_coord_1d(values), 1.5);
+        // Shift flux toward +x: centroid moves right of center, by less than
+        // a full pixel.
+        let image_7x7 = gray_image!(
+            9,  9,  9,  9,  9,  9,  9;
+            9, 10, 10, 10, 10, 10,  9;
+            9, 10, 20, 40, 30, 10,  9;
+            9, 10, 40, 80, 60, 10,  9;
+            9, 10, 20, 40, 30, 10,  9;
+            9, 10, 10, 10, 10, 10,  9;
+            9,  9,  9,  9,  9,  9,  9);
+        let (x, y) = compute_centroid(&image_7x7, &bounding_box, 1.0);
+        assert!(x > 3.0 && x < 4.0, "expected centroid right of center, got {}", x);
+        assert_abs_diff_eq!(y, 3.0, epsilon = 0.01);
 
-        // Peak is left-most position.
-        let values = vec![12, 2, 2, 1, 2];
-        assert_eq!(peak_coord_1d(values), 0.0);
-
-        // Peak is right-most position.
-        let values = vec![12, 2, 2, 1, 22];
-        assert_eq!(peak_coord_1d(values), 4.0);
-
-        // Quadratic interpolation cases.
-        let values = vec![1, 3, 10, 3, 2];
-        assert_eq!(peak_coord_1d(values), 2.0);
-        let values = vec![1, 3, 10, 5, 2];
-        assert_abs_diff_eq!(peak_coord_1d(values), 2.1, epsilon = 0.05);
-        let values = vec![1, 9, 10, 0, 2];
-        assert_abs_diff_eq!(peak_coord_1d(values), 1.6, epsilon = 0.05);
+        // Uniform region: nothing exceeds the threshold, so we fall back to
+        // the box center rather than dividing by zero.
+        let flat_7x7 = gray_image!(
+            9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  9,  9);
+        let (x, y) = compute_centroid(&flat_7x7, &bounding_box, 1.0);
+        assert_abs_diff_eq!(x, 3.0, epsilon = 0.01);
+        assert_abs_diff_eq!(y, 3.0, epsilon = 0.01);
     }
 
     #[test]
@@ -1945,10 +1965,13 @@ mod tests {
         assert_eq!(roi_summary.histogram[32], 1);
         // The hot pixel is not the peak, but it can influence
         // the centroided position of the peak and the peak_value.
+        // The hot pixel is still present (unreplaced) in the image the
+        // centroid is computed over, and carries much of the weight, pulling
+        // the result toward it and away from the true peak at x=5.
         assert_abs_diff_eq!(roi_summary.peak_x,
-                            4.5, epsilon = 0.1);
+                            4.71, epsilon = 0.1);
         assert_abs_diff_eq!(roi_summary.peak_y,
-                            3.7, epsilon = 0.1);
+                            3.83, epsilon = 0.1);
         assert_abs_diff_eq!(roi_summary.peak_value,
                             20.8, epsilon = 0.1);
     }
