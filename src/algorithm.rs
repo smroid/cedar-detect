@@ -870,10 +870,10 @@ pub fn estimate_noise_from_image(image: &GrayImage) -> f64 {
     // variations.
     let cut_size = cmp::min(50, width / 4);
 
-    // Sample three areas across each of three horizontal cuts of the image.
-    let mut stats_arr = Vec::with_capacity(9);
-    for vert in 1..=3 {
-        let y = (height * vert / 4) as i32;
+    // Sample three areas across each of five horizontal cuts of the image.
+    let mut stats_arr = Vec::with_capacity(15);
+    for vert in 1..=5 {
+        let y = (height * vert / 6) as i32;
         for horiz in 1..=3 {
             let x = (width * horiz / 4 - cut_size/2) as i32;
             stats_arr.push(
