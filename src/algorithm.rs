@@ -714,30 +714,19 @@ fn gate_star_2d(
     let background_est = perimeter_sum as f64 / perimeter_count as f64;
     debug!("background: {} for blob {:?}", background_est, core);
 
-    // Compute a second noise estimate from the perimeter. If we're in clutter
-    // such as an illuminated foreground object, this noise estimate will be
-    // high, suppressing spurious "star" detections.
-    let mut perimeter_dev_2: f64 = 0.0;
-    for_each_perimeter_pixel(image, &perimeter, |_x, _y, pixel_value| {
-        let res = i32::from(pixel_value) as f64 - background_est;
-        perimeter_dev_2 += res * res;
-    });
-    let perimeter_stddev = (perimeter_dev_2 / perimeter_count as f64).sqrt();
-    let max_noise_estimate = f64::max(noise_estimate, perimeter_stddev);
-
     // We require the perimeter pixels to be ~uniformly dark. See if any
     // perimeter pixel is too bright compared to the darkest perimeter
     // pixel.
-    // The 3x sigma_noise threshold is empirically chosen to yield a low
+    // The 1.5x sigma_noise threshold is empirically chosen to yield a low
     // rejection rate for actual sky background perimeter pixels.
     if (i32::from(perimeter_max) - i32::from(perimeter_min)) as f64 >
-        3.0 * sigma * noise_estimate {
+        1.5 * sigma * noise_estimate {
         debug!("Perimeter too varied for blob {:?}", core);
         return None;
     }
 
     // Verify that core average exceeds background by sigma * noise.
-    if core_mean - background_est < sigma * max_noise_estimate {
+    if core_mean - background_est < sigma * noise_estimate {
         debug!("Core too weak for blob {:?}", core);
         return None;
     }
