@@ -367,6 +367,11 @@ fn scan_row_for_candidates_default(
 
 // Applies scan_row_for_candidates at all rows of the image to identify star
 // candidates for further screening.
+//
+// The outermost three rows are skipped. gate_star_2d() rejects any blob whose
+// core comes within three pixels of an image edge, so candidates found there
+// could never become stars; skipping them also lets classify_pixel() rely on
+// the rows above and below a candidate existing.
 fn scan_image_for_candidates(image: &GrayImage,
                              noise_estimate: f64,
                              sigma: f64)
@@ -383,7 +388,7 @@ fn scan_image_for_candidates(image: &GrayImage,
 
     let estimated_candidates = (width * height) / 10000;
     let mut xy_candidates: Vec<(i32, i32)> = Vec::with_capacity(estimated_candidates);
-    for rownum in 0..height {
+    for rownum in 3..height.saturating_sub(3) {
         scan_row(image, rownum, sigma_noise_2, sigma_noise_3, &mut xy_candidates);
     }
 
@@ -963,6 +968,9 @@ pub fn get_stars_from_image(image: &GrayImage,
     let noise_floor = 0.2;
     let noise_estimate = f64::max(noise_estimate, noise_floor);
     let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate + 0.5) as i16, 2);
+    // Both are measured against the full resolution image, which is what
+    // all_bright_are_hot() examines regardless of binning.
+    let min_neighbor_excess_8 = min_neighbor_excess_8(noise_estimate);
 
     let mut stars = Vec::<StarDescription>::new();
     let mut hot_pixels = Vec::<HotPixel>::new();
@@ -980,7 +988,8 @@ pub fn get_stars_from_image(image: &GrayImage,
         let mut max_y = 0usize;
         for cand in candidates_1d {
             if all_bright_are_hot(image, cand.x, cand.y, binning,
-                                  sigma_noise_2, &mut hot_pixels) {
+                                  sigma_noise_2, min_neighbor_excess_8,
+                                  &mut hot_pixels) {
                 // Discard candidate.
             } else {
                 max_y = max_y.max(cand.y as usize);
@@ -1049,7 +1058,8 @@ pub fn get_stars_from_image(image: &GrayImage,
     let mut max_y = 0usize;
     for cand in candidates_1d {
         if all_bright_are_hot(image, cand.x, cand.y, binning,
-                              sigma_noise_2, &mut hot_pixels) {
+                              sigma_noise_2, min_neighbor_excess_8,
+                              &mut hot_pixels) {
             // candidate discarded; hot pixels already collected above
         } else {
             max_y = max_y.max(cand.y as usize);
@@ -1076,7 +1086,7 @@ pub fn get_stars_from_image(image: &GrayImage,
 // bright. Pushes any hot sub-pixels into `hot_pixels`.
 fn all_bright_are_hot(full_res_image: &GrayImage,
                       x: i32, y: i32, binning: u32,
-                      sigma_noise_2: i16,
+                      sigma_noise_2: i16, min_neighbor_excess_8: i16,
                       hot_pixels: &mut Vec<HotPixel>) -> bool {
     let width = full_res_image.dimensions().0 as i32;
     let image_pixels: &Vec<u8> = full_res_image.as_raw();
@@ -1094,14 +1104,27 @@ fn all_bright_are_hot(full_res_image: &GrayImage,
         let row_pixels: &[u8] = &image_pixels.as_slice()
             [(backing_y * width) as usize ..
              ((backing_y+1) * width) as usize];
+        // The rows bracketing this one, for classify_pixel()'s vertical
+        // neighbors. scan_image_for_candidates() skips the outermost rows, so
+        // these exist for any candidate we are called with.
+        let above_pixels: &[u8] = &image_pixels.as_slice()
+            [((backing_y - 1) * width) as usize ..
+             (backing_y * width) as usize];
+        let below_pixels: &[u8] = &image_pixels.as_slice()
+            [((backing_y + 1) * width) as usize ..
+             ((backing_y + 2) * width) as usize];
 
         for xi in 0..binning {
             let backing_x = x_full + xi as i32;
 
-            let start_x = backing_x - 3;
-            let end_x = backing_x + 4;
-            let gate = &row_pixels[start_x as usize .. end_x as usize];
-            let (pixel_type, val) = classify_pixel(gate, sigma_noise_2);
+            let start_x = (backing_x - 3) as usize;
+            let end_x = (backing_x + 4) as usize;
+            let gate = &row_pixels[start_x .. end_x];
+            let gate_above = &above_pixels[start_x .. end_x];
+            let gate_below = &below_pixels[start_x .. end_x];
+            let (pixel_type, val) =
+                classify_pixel(gate_above, gate, gate_below, sigma_noise_2,
+                               min_neighbor_excess_8);
             match pixel_type {
                 PixelHotType::Bright => { has_bright = true; }
                 PixelHotType::Hot => {
@@ -1131,31 +1154,117 @@ enum PixelHotType {
 // star nor an isolated hot pixel.
 // Returns Bright if the center pixel is bright enough to possibly be part
 // of a star.
-// Returns Hot if the center of the 7-pixel gate is an isolated hot pixel. In
-// this case the pixel value is replaced with the average of its neighbors.
-fn classify_pixel(gate: &[u8], sigma_noise_2: i16) -> (PixelHotType, u8)
+// Returns Hot if the center of the gate is an isolated hot pixel. In this
+// case the pixel value is replaced with the average of its neighbors.
+//
+// `gate_above` and `gate_below` are the 7-pixel gates from the rows directly
+// above and below `gate`, aligned to the same columns. Callers guarantee those
+// rows exist; scan_image_for_candidates() skips the outermost rows, which
+// cannot yield stars anyway.
+//
+// Each row's own border and margin pixels estimate that row's background, so
+// the vertical neighbors are compared against their own rows rather than the
+// center's (sensors such as the IMX296mono vary in offset from row to row).
+//
+// `min_neighbor_excess_8` is 8x the smallest summed neighbor excess we are
+// willing to treat as evidence of a star, in pixel value units. It floors the
+// isolation threshold: without it, a candidate whose center barely clears the
+// brightness gate gets an isolation threshold smaller than the noise on the
+// neighbor sum, making the comparison meaningless. See
+// min_neighbor_excess_8() for how it is derived.
+fn classify_pixel(gate_above: &[u8], gate: &[u8], gate_below: &[u8],
+                  sigma_noise_2: i16, min_neighbor_excess_8: i16)
+                  -> (PixelHotType, u8)
 {
     let lb = gate[0] as i16;
     let c = gate[3] as i16;
     let rb = gate[6] as i16;
 
-    // Hot pixel must be bright compared to background.
+    // Hot pixel must be bright compared to background. This test stays on the
+    // two border pixels, matching gate_star_1d()'s notion of background so the
+    // two agree about which pixels are worth considering at all.
     let est_background_2 = lb + rb;
     let center_minus_background_2 = c + c - est_background_2;
     if center_minus_background_2 < sigma_noise_2 {
         return (PixelHotType::Dark, gate[3]);
     }
 
-    // Sum of l + r (minus background) must exceed 0.25 * center (minus
-    // background). Otherwise, the center is a hot pixel.
+    // Sum of l + r + u + d (each minus its own row's background) must exceed
+    // 0.5 * center (minus background). Otherwise, the center is a hot pixel.
+    //
+    // With twice as many neighbors, the 0.5 ratio admits the same point spread
+    // that 0.25 admits for two neighbors, so widening the gate improves the
+    // noise margin rather than changing which stars qualify.
+    //
+    // A row's background sums its border and margin pixels, at +/-3 and +/-2
+    // from center; both are far enough out that a single hot pixel does not
+    // reach them. Sums are kept scaled by 4 (four background pixels per row) to
+    // stay in integer arithmetic.
+    // Pixel labels follow gate_star_1d()'s |lb lm l C r rm rb|, with u and d
+    // the vertical neighbors drawn from the rows above and below.
+    let lm = gate[1] as i16;
     let l = gate[2] as i16;
     let r = gate[4] as i16;
-    let neighbor_sum = l + r;
-    let neighbor_sum_minus_background = neighbor_sum - est_background_2;
-    if 4 * neighbor_sum_minus_background <= center_minus_background_2 / 2 {
-        return (PixelHotType::Hot, (neighbor_sum / 2) as u8);
+    let rm = gate[5] as i16;
+    let u = gate_above[3] as i16;
+    let d = gate_below[3] as i16;
+
+    // A row's background is the sum of its four outer pixels, lb + lm + rm + rb,
+    // which is 4x that row's mean. Everything below therefore carries a factor
+    // of 4, which is what keeps the arithmetic in integers.
+    let row_background_4 = |g: &[u8]| -> i16 {
+        g[0] as i16 + g[1] as i16 + g[5] as i16 + g[6] as i16
+    };
+    let background_center_4 = est_background_2 + lm + rm;
+    let background_above_4 = row_background_4(gate_above);
+    let background_below_4 = row_background_4(gate_below);
+
+    // 4x a pixel's excess over the background of whichever row it sits in.
+    let excess_4 = |pixel: i16, background_4: i16| 4 * pixel - background_4;
+
+    // Each neighbor is measured against its own row. A row sitting at a
+    // different offset than its neighbors then cancels out of the sum rather
+    // than masquerading as neighbor flux.
+    let neighbor_excess_4 = excess_4(l, background_center_4) +
+                            excess_4(r, background_center_4) +
+                            excess_4(u, background_above_4) +
+                            excess_4(d, background_below_4);
+    let center_excess_4 = excess_4(c, background_center_4);
+
+    // The neighbors must carry more than half the center's excess, and in any
+    // case at least min_neighbor_excess. Comparing at 8x lets the halving fall
+    // out for free: half of center_excess_4 at 8x scale is center_excess_4.
+    let threshold_8 = cmp::max(center_excess_4, min_neighbor_excess_8);
+    if 2 * neighbor_excess_4 <= threshold_8 {
+        let neighbor_sum = l + r + u + d;
+        return (PixelHotType::Hot, (neighbor_sum / 4) as u8);
     }
-    (PixelHotType::Bright, c as u8)
+    (PixelHotType::Bright, gate[3])
+}
+
+// The isolation test in classify_pixel() asks whether a candidate's neighbors
+// carry enough flux to be a star rather than a lone hot pixel. Its threshold
+// is half the center pixel's excess over background, which shrinks as
+// candidates get fainter; below roughly `sigma` 7 it drops under the noise of
+// the neighbor sum itself and the test loses its power. This returns a floor
+// for that threshold, so a marginal candidate must still show neighbor flux
+// that is significantly higher than background, rather than merely a fraction
+// of a faint center.
+//
+// The multiplier is stated in units of the neighbor sum's own standard
+// deviation, which is sqrt(5.5) ~= 2.35 times the per-pixel noise: four
+// neighbors, each referenced to a four-pixel row background. A floor of ~1.5
+// of those standard deviations roughly equalizes the two error rates (leaking
+// a hot pixel versus discarding a faint star) at low `sigma`, and sits below
+// the ratio threshold at `sigma` 8 and above, leaving normal operation
+// untouched.
+//
+// Returned pre-scaled by 8 to match classify_pixel()'s integer arithmetic.
+fn min_neighbor_excess_8(noise_estimate: f64) -> i16 {
+    const NEIGHBOR_SUM_STDDEV_PER_NOISE: f64 = 2.345;
+    const FLOOR_STDDEVS: f64 = 1.5;
+    (8.0 * FLOOR_STDDEVS * NEIGHBOR_SUM_STDDEV_PER_NOISE * noise_estimate + 0.5)
+        as i16
 }
 
 /// Summarizes an image region of interest. The pixel values used are not
@@ -1209,6 +1318,7 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
         (roi.left() + roi.width() as i32 / 2,
          roi.top() + roi.height() as i32 / 2);
     let sigma_noise_2 = cmp::max((2.0 * sigma * noise_estimate + 0.5) as i16, 2);
+    let min_neighbor_excess_8 = min_neighbor_excess_8(noise_estimate);
 
     // Sliding gate needs to extend past left and right edges of ROI. Make sure
     // there's enough image.
@@ -1235,10 +1345,25 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
         let row_pixels: &[u8] = &image_pixels.as_slice()
             [row_start + gate_leftmost as usize ..
              row_start + gate_rightmost as usize];
+        // The rows bracketing this one, for classify_pixel()'s vertical
+        // neighbors. The top/bottom margin asserted above guarantees they
+        // exist.
+        let above_start = ((rownum - 1) * width as i32) as usize;
+        let below_start = ((rownum + 1) * width as i32) as usize;
+        let above_pixels: &[u8] = &image_pixels.as_slice()
+            [above_start + gate_leftmost as usize ..
+             above_start + gate_rightmost as usize];
+        let below_pixels: &[u8] = &image_pixels.as_slice()
+            [below_start + gate_leftmost as usize ..
+             below_start + gate_rightmost as usize];
         // Slide a 7 pixel gate across the row.
         let mut center_x = roi.left();
-        for gate in row_pixels.windows(7) {
-            let (pixel_type, val) = classify_pixel(gate, sigma_noise_2);
+        for (i, gate) in row_pixels.windows(7).enumerate() {
+            let gate_above = &above_pixels[i .. i + 7];
+            let gate_below = &below_pixels[i .. i + 7];
+            let (pixel_type, val) =
+                classify_pixel(gate_above, gate, gate_below, sigma_noise_2,
+                               min_neighbor_excess_8);
             if val >= peak_val {
                 // See if this is a hot pixel.
                 if pixel_type == PixelHotType::Hot {
@@ -1876,6 +2001,44 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_pixel_min_neighbor_excess() {
+        let sigma_noise_2 = 10;
+        let floor = min_neighbor_excess_8(1.0);
+
+        // A marginal candidate: the center is only 5 above a background of 10,
+        // just clearing the brightness gate. Its neighbors carry a little flux
+        // -- more than half the center's excess, but not significantly higher
+        // than background.
+        let above =  [10, 10, 10, 11, 10, 10, 10];
+        let center = [10, 10, 11, 15, 11, 10, 10];
+        let below =  [10, 10, 10, 10, 10, 10, 10];
+        // Judged by the ratio alone, the neighbors look like a star.
+        assert_eq!(classify_pixel(&above, &center, &below, sigma_noise_2, 0).0,
+                   PixelHotType::Bright);
+        // The floor requires neighbor flux significantly higher than
+        // background, rather than merely a fraction of a faint center, so this
+        // is rejected as hot.
+        assert_eq!(classify_pixel(&above, &center, &below, sigma_noise_2, floor).0,
+                   PixelHotType::Hot);
+
+        // A bright candidate is unaffected: half its excess already exceeds the
+        // floor, leaving the ratio test in control.
+        let above_bright =  [10, 10, 10, 40, 10, 10, 10];
+        let center_bright = [10, 10, 40, 80, 40, 10, 10];
+        let below_bright =  [10, 10, 10, 40, 10, 10, 10];
+        assert_eq!(classify_pixel(&above_bright, &center_bright, &below_bright,
+                                  sigma_noise_2, floor).0,
+                   PixelHotType::Bright);
+        // As is a bright pixel with no neighbor support at all.
+        let above_hot =  [10, 10, 10, 10, 10, 10, 10];
+        let center_hot = [10, 10, 10, 80, 10, 10, 10];
+        let below_hot =  [10, 10, 10, 10, 10, 10, 10];
+        assert_eq!(classify_pixel(&above_hot, &center_hot, &below_hot,
+                                  sigma_noise_2, floor).0,
+                   PixelHotType::Hot);
+    }
+
+    #[test]
     fn test_brightness() {
         let image_7x7 = gray_image!(
         9,  9,  9,   9,  9,  9,  9;
@@ -1932,37 +2095,40 @@ mod tests {
     #[test]
     fn test_summarize_region_of_interest_good_edges() {
         let roi = Rect::at(3, 3).of_size(3, 2);
-        // 80 is a hot pixel, is replaced by interpolation of its left
-        // and right neighbors.
+        // 80 is a hot pixel: bright, but isolated in both axes, so it is
+        // replaced by the average of its four neighbors. The star peaking at
+        // 32 has extent in both axes, as real stars do, so it survives as the
+        // peak.
         let image_9x9 = gray_image!(
             9,  9,  9,  9,  9,  9,  9,  9,  9;
             9,  9,  9,  9,  9,  9,  9,  9,  9;
-            9,  9,  9,  9,  9,  9,  9,  9,  9;
-            9,  9,  9,  7,  80, 9,  9,  9,  9;
-            9,  9,  9,  11, 20, 32, 10, 9,  9;
-            9,  9,  9,  9,  9,  9,  9,  9,  9;
-            9,  9,  9,  9,  9,  9,  9,  9,  9;
+            9,  9,  9,  9,  9,  14, 9,  9,  9;
+            9,  9,  9,  7,  80, 22, 10, 9,  9;
+            9,  9,  9,  11, 20, 32, 14, 9,  9;
+            9,  9,  9,  9,  12, 22, 10, 9,  9;
+            9,  9,  9,  9,  9,  14, 9,  9,  9;
             9,  9,  9,  9,  9,  9,  9,  9,  9);
         // ROI is correct distance from left+right edges.
         let roi_summary = summarize_region_of_interest(
             &image_9x9, &roi, 1.0, 5.0);
         assert_eq!(roi_summary.histogram[7], 1);
-        assert_eq!(roi_summary.histogram[8], 1);
-        assert_eq!(roi_summary.histogram[9], 1);
         assert_eq!(roi_summary.histogram[11], 1);
+        // The hot pixel's 80 does not appear; it contributes the average of
+        // its four neighbors, (7 + 22 + 9 + 20) / 4.
+        assert_eq!(roi_summary.histogram[14], 1);
         assert_eq!(roi_summary.histogram[20], 1);
+        assert_eq!(roi_summary.histogram[22], 1);
         assert_eq!(roi_summary.histogram[32], 1);
-        // The hot pixel is not the peak, but it can influence
-        // the centroided position of the peak and the peak_value.
-        // The hot pixel is still present (unreplaced) in the image the
-        // centroid is computed over, and carries much of the weight, pulling
-        // the result toward it and away from the true peak at x=5.
+        // The hot pixel is not the peak, but it can influence the centroided
+        // position of the peak and the peak_value. It is still present
+        // (unreplaced) in the image the centroid is computed over, pulling the
+        // result up and to the left of the true peak at (5, 4).
         assert_abs_diff_eq!(roi_summary.peak_x,
-                            4.71, epsilon = 0.1);
+                            4.92, epsilon = 0.1);
         assert_abs_diff_eq!(roi_summary.peak_y,
-                            3.83, epsilon = 0.1);
+                            4.00, epsilon = 0.1);
         assert_abs_diff_eq!(roi_summary.peak_value,
-                            20.8, epsilon = 0.1);
+                            24.67, epsilon = 0.1);
     }
 
     #[test]
