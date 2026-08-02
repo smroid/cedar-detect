@@ -785,6 +785,11 @@ fn gate_star_2d(
 // subtracted and summed to form the brightness value.
 // Returns: (summed pixel values, count of saturated pixels, peak pixel value)
 fn compute_brightness(image: &GrayImage, bounding_box: &Rect) -> (f64, u16, u8) {
+    // The inset below discards a one pixel ring, so anything smaller than 3x3
+    // leaves nothing to sum (and a width below 2 would underflow).
+    debug_assert!(bounding_box.width() >= 3 && bounding_box.height() >= 3,
+                  "bounding_box {:?} too small to inset", bounding_box);
+
     let mut boundary_sum: i32 = 0;
     let mut boundary_count: i32 = 0;
     for_each_perimeter_pixel(image, bounding_box, |_x, _y, pixel_value| {
@@ -799,6 +804,11 @@ fn compute_brightness(image: &GrayImage, bounding_box: &Rect) -> (f64, u16, u8) 
     let mut num_saturated = 0;
     let mut sum = 0.0;
     let mut peak_value: u8 = 0;
+    // The background-subtracted pixel values are deliberately not clamped at
+    // zero here, in contrast to the weights in compute_centroid(). Background
+    // noise is symmetric about background_est, so letting the negative values
+    // cancel the positive ones keeps the brightness unbiased. Only the total is
+    // clamped, and only to avoid reporting a negative brightness.
     for_each_pixel_in_roi(image, &inset, |_x, _y, pixel_value| {
         if pixel_value == 255_u8 {
             num_saturated += 1;
