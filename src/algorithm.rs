@@ -1278,12 +1278,12 @@ fn min_neighbor_excess_8(noise_estimate: f64) -> i16 {
 }
 
 /// Summarizes an image region of interest. The pixel values used are not
-/// background subtracted. Single hot pixels are replaced with interpolated
-/// neighbor values when locating the peak pixel and when accumulating the
-/// histogram.
+/// background subtracted. Single hot pixels are rejected when locating the peak
+/// pixel; the histogram accumulates the original pixel values.
 #[derive(Debug)]
 pub struct RegionOfInterestSummary {
-    /// Histogram of pixel values in the ROI.
+    /// Histogram of raw pixel values in the ROI. Hot pixels are counted at
+    /// their own values; only `peak_x`/`peak_y` exclude them.
     pub histogram: [u32; 256],
 
     /// The location (in image coordinates) of the peak pixel. If there are
@@ -1349,38 +1349,43 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
     let mut peak_y = 0;
     let mut peak_val = 0_u8;
     let mut peak_center_dist_sq = i32::MAX;
+    // The scan reads raw pixel values, histogramming each and testing it as a
+    // peak candidate. The 7 pixel gate that identifies hot pixels is formed
+    // only for candidates -- pixels reaching `peak_val`, which is a ratcheting
+    // threshold, so this happens a handful of times over the whole ROI rather
+    // than once per pixel.
+    // Consequently the histogram holds raw values, including hot pixels.
     for rownum in roi.top()..=roi.bottom() {
         // Get the slice of image_pixels corresponding to this row of the ROI.
         let row_start = (rownum * width as i32) as usize;
         let row_pixels: &[u8] = &image_pixels.as_slice()
-            [row_start + gate_leftmost as usize ..
-             row_start + gate_rightmost as usize];
-        // The rows bracketing this one, for classify_pixel()'s vertical
-        // neighbors. The top/bottom margin asserted above guarantees they
-        // exist.
-        let above_start = ((rownum - 1) * width as i32) as usize;
-        let below_start = ((rownum + 1) * width as i32) as usize;
-        let above_pixels: &[u8] = &image_pixels.as_slice()
-            [above_start + gate_leftmost as usize ..
-             above_start + gate_rightmost as usize];
-        let below_pixels: &[u8] = &image_pixels.as_slice()
-            [below_start + gate_leftmost as usize ..
-             below_start + gate_rightmost as usize];
-        // Slide a 7 pixel gate across the row.
+            [row_start + roi.left() as usize ..
+             row_start + roi.right() as usize + 1];
         let mut center_x = roi.left();
-        for (i, gate) in row_pixels.windows(7).enumerate() {
-            let gate_above = &above_pixels[i .. i + 7];
-            let gate_below = &below_pixels[i .. i + 7];
-            let (pixel_type, val) =
-                classify_pixel(gate_above, gate, gate_below, sigma_noise_2,
-                               min_neighbor_excess_8);
+        for &val in row_pixels {
+            histogram[val as usize] += 1;
             if val >= peak_val {
-                // See if this is a hot pixel.
-                if pixel_type == PixelHotType::Hot {
-                    // Hot pixel can't be peak. classify_pixel already substituted
-                    // the interpolated neighbor average into val; fall through to
-                    // add that to the histogram.
-                } else {
+                // Candidate peak, reject hot pixel.
+                // The margins asserted above guarantee the bracketing rows
+                // and the horizontal gate extent all exist.
+                // The gate spans center_x-3 ..= center_x+3, in each of the
+                // three rows.
+                let gate_x = (center_x - 3) as usize;
+                let above_start = ((rownum - 1) * width as i32) as usize;
+                let below_start = ((rownum + 1) * width as i32) as usize;
+                let pixels = image_pixels.as_slice();
+                let gate: &[u8] =
+                    &pixels[row_start + gate_x .. row_start + gate_x + 7];
+                let gate_above: &[u8] =
+                    &pixels[above_start + gate_x .. above_start + gate_x + 7];
+                let gate_below: &[u8] =
+                    &pixels[below_start + gate_x .. below_start + gate_x + 7];
+                let (pixel_type, _classified_val) =
+                    classify_pixel(gate_above, gate, gate_below, sigma_noise_2,
+                                   min_neighbor_excess_8);
+                // A hot pixel cannot be the peak; ignore it entirely, leaving
+                // `peak_val` untouched so later stars remain eligible.
+                if pixel_type != PixelHotType::Hot {
                     let center_dist_sq =
                         (center_x - roi_center_x) * (center_x - roi_center_x) +
                         (rownum - roi_center_y) * (rownum - roi_center_y);
@@ -1402,7 +1407,6 @@ pub fn summarize_region_of_interest(image: &GrayImage, roi: &Rect,
                     }
                 }
             }  // Candidate peak.
-            histogram[val as usize] += 1;
             center_x += 1;
         }
     }
@@ -1438,6 +1442,7 @@ mod tests {
     use image::Luma;
     use imageproc::gray_image;
     use imageproc::noise::gaussian_noise;
+    use std::time::Duration;
     use super::*;
 
     #[test]
@@ -2106,9 +2111,9 @@ mod tests {
     fn test_summarize_region_of_interest_good_edges() {
         let roi = Rect::at(3, 3).of_size(3, 2);
         // 80 is a hot pixel: bright, but isolated in both axes, so it is
-        // replaced by the average of its four neighbors. The star peaking at
-        // 32 has extent in both axes, as real stars do, so it survives as the
-        // peak.
+        // rejected as a peak candidate. The star peaking at 32 has extent in
+        // both axes, as real stars do, so it wins the peak despite being
+        // dimmer.
         let image_9x9 = gray_image!(
             9,  9,  9,  9,  9,  9,  9,  9,  9;
             9,  9,  9,  9,  9,  9,  9,  9,  9;
@@ -2123,12 +2128,15 @@ mod tests {
             &image_9x9, &roi, 1.0, 5.0);
         assert_eq!(roi_summary.histogram[7], 1);
         assert_eq!(roi_summary.histogram[11], 1);
-        // The hot pixel's 80 does not appear; it contributes the average of
-        // its four neighbors, (7 + 22 + 9 + 20) / 4.
-        assert_eq!(roi_summary.histogram[14], 1);
         assert_eq!(roi_summary.histogram[20], 1);
         assert_eq!(roi_summary.histogram[22], 1);
         assert_eq!(roi_summary.histogram[32], 1);
+        // The histogram holds raw values, so the hot pixel appears at its own
+        // 80 rather than as an interpolated neighbor average. The histogram
+        // is consulted only for percentiles over a large ROI, where the few
+        // hot pixels cannot move the result.
+        assert_eq!(roi_summary.histogram[80], 1);
+        assert_eq!(roi_summary.histogram[14], 0);
         // The hot pixel is not the peak, but it can influence the centroided
         // position of the peak and the peak_value. It is still present
         // (unreplaced) in the image the centroid is computed over, pulling the
@@ -2202,6 +2210,166 @@ mod tests {
                             5.5, epsilon = 0.01);
         assert_abs_diff_eq!(roi_summary.peak_y,
                             5.5, epsilon = 0.01);
+    }
+
+    // Builds a synthetic night-sky frame: noisy dark background, tight
+    // gaussian stars, and isolated single-pixel hot spots. Deterministic
+    // (fixed seeds and a simple LCG), so results are reproducible run to run.
+    //
+    // Returns the image plus the positions of the brightest star and the
+    // brightest hot pixel, so callers can assert which one wins the peak.
+    fn synth_star_field(width: u32, height: u32)
+                        -> (GrayImage, (i32, i32), (i32, i32)) {
+        // Background: mean 10, stddev 2, as a dark sky frame.
+        let mut image = gaussian_noise(&GrayImage::new(width, height),
+                                       10.0, 2.0, 42);
+
+        // Simple deterministic LCG; we want reproducibility, not quality.
+        let mut rng_state = 0x2545F491_4F6CDD1D_u64;
+        let mut next = |bound: u32| -> u32 {
+            rng_state = rng_state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((rng_state >> 33) as u32) % bound
+        };
+
+        // Keep everything well inside the edges: summarize_region_of_interest
+        // requires margin around the ROI, and stars need room for their tails.
+        let margin = 16_i32;
+        let x_range = (width as i32 - 2 * margin) as u32;
+        let y_range = (height as i32 - 2 * margin) as u32;
+
+        // Tight gaussian stars. sigma below one pixel, as real stars are on a
+        // well-focused sensor, so most of the flux lands in a 3x3.
+        let sigma = 0.9_f64;
+        let num_stars = 400;
+        let mut brightest_star = (0_i32, 0_i32);
+        let mut brightest_star_amp = 0_u32;
+        for i in 0..num_stars {
+            let cx = margin + next(x_range) as i32;
+            let cy = margin + next(y_range) as i32;
+            // Amplitudes spread over a realistic range; the brightest star
+            // stays below the hot pixels so we can tell them apart.
+            let amp = 40 + next(140);
+            if amp > brightest_star_amp {
+                brightest_star_amp = amp;
+                brightest_star = (cx, cy);
+            }
+            for dy in -3..=3_i32 {
+                for dx in -3..=3_i32 {
+                    let r2 = (dx * dx + dy * dy) as f64;
+                    let falloff = (-r2 / (2.0 * sigma * sigma)).exp();
+                    let add = (amp as f64 * falloff) as u32;
+                    if add == 0 {
+                        continue;
+                    }
+                    let px = (cx + dx) as u32;
+                    let py = (cy + dy) as u32;
+                    let cur = image.get_pixel(px, py).0[0] as u32;
+                    image.put_pixel(px, py,
+                                    Luma([cur.saturating_add(add).min(255) as u8]));
+                }
+            }
+            // Silence the unused-variable warning on the loop counter without
+            // changing the loop shape.
+            let _ = i;
+        }
+
+        // Isolated single-pixel hot spots, some at full scale. These are what
+        // the hot pixel logic must reject as peak candidates.
+        let num_hot = 60;
+        let mut brightest_hot = (0_i32, 0_i32);
+        let mut brightest_hot_amp = 0_u32;
+        for _ in 0..num_hot {
+            let hx = margin + next(x_range) as i32;
+            let hy = margin + next(y_range) as i32;
+            // Well above the brightest star, up to saturation.
+            let amp = 200 + next(56);
+            if amp > brightest_hot_amp {
+                brightest_hot_amp = amp;
+                brightest_hot = (hx, hy);
+            }
+            image.put_pixel(hx as u32, hy as u32, Luma([amp.min(255) as u8]));
+        }
+
+        (image, brightest_star, brightest_hot)
+    }
+
+    // A full-size frame exercising summarize_region_of_interest over a
+    // realistic ROI (the full-height centered square that detect_engine uses
+    // in focus mode). Large enough to time meaningfully; reports per-call
+    // timing so changes to the function can be compared:
+    //
+    //   cargo test --release test_summarize_region_of_interest_large -- --nocapture
+    //
+    // Build in release: a debug build is dominated by bounds checks and is
+    // not indicative.
+    #[test]
+    fn test_summarize_region_of_interest_large() {
+        let (width, height) = (1920_u32, 1080_u32);
+        let (image, _brightest_star, _brightest_hot) =
+            synth_star_field(width, height);
+
+        // The centered square crop, inset to leave the margin that
+        // summarize_region_of_interest requires around the ROI.
+        let inset = 8_i32;
+        let square = height as i32;
+        let roi = Rect::at((width as i32 - square) / 2 + inset, inset)
+            .of_size((square - 2 * inset) as u32,
+                     (square - 2 * inset) as u32);
+
+        let noise_estimate = estimate_noise_from_image(&image);
+
+        // One warm-up call (page faults, cache) that we don't time.
+        let roi_summary =
+            summarize_region_of_interest(&image, &roi, noise_estimate, 8.0);
+
+        let iterations = 10;
+        let mut best = Duration::MAX;
+        let mut total_elapsed = Duration::ZERO;
+        for _ in 0..iterations {
+            let start = Instant::now();
+            let s = summarize_region_of_interest(
+                &image, &roi, noise_estimate, 8.0);
+            let elapsed = start.elapsed();
+            total_elapsed += elapsed;
+            best = best.min(elapsed);
+            // Keep the call from being optimized away.
+            assert_eq!(s.histogram.len(), 256);
+        }
+        let pixels = roi.width() as f64 * roi.height() as f64;
+        println!(
+            "summarize_region_of_interest over {}x{} ROI ({:.2} Mpixel): \
+             best {:?}, mean {:?} ({:.1} Mpixel/s at best)",
+            roi.width(), roi.height(), pixels / 1e6,
+            best, total_elapsed / iterations,
+            pixels / best.as_secs_f64() / 1e6);
+
+        // Every ROI pixel is histogrammed exactly once.
+        let total: u32 = roi_summary.histogram.iter().sum();
+        assert_eq!(total as i32, roi.width() as i32 * roi.height() as i32);
+
+        // The background dominates, so the low end of the histogram holds the
+        // bulk of the pixels while the bright tail stays sparse.
+        let background: u32 = roi_summary.histogram[..32].iter().sum();
+        assert!(background > total * 9 / 10,
+                "expected background to dominate, got {} of {}",
+                background, total);
+
+        // The peak must land on a star, not on one of the much brighter hot
+        // pixels: peak_value is a 3x3 mean around the peak, so an isolated
+        // 255 spike surrounded by background would score far below a star.
+        assert!(roi_summary.peak_value < 200.0,
+                "peak_value {} suggests a hot pixel won the peak",
+                roi_summary.peak_value);
+
+        // The peak is inside the ROI.
+        assert!(roi_summary.peak_x >= roi.left() as f64
+                && roi_summary.peak_x <= roi.right() as f64,
+                "peak_x {} outside ROI", roi_summary.peak_x);
+        assert!(roi_summary.peak_y >= roi.top() as f64
+                && roi_summary.peak_y <= roi.bottom() as f64,
+                "peak_y {} outside ROI", roi_summary.peak_y);
     }
 
 }  // mod tests.
